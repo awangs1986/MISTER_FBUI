@@ -65,6 +65,12 @@ int   hasAPI1_5();
 
 void video_fb_enable(int enable, int n = 0);
 int video_fb_state();
+// 1 (default): FB_FMT_RxB; 0: no R/B swap. Used by fb_probe.
+void video_fb_set_rxb(int enable);
+// Read back FPGA FB params after UIO_SET_FBUF. Returns 1 if SPI ok.
+int video_fb_readback(uint16_t *fb_fmt, uint16_t *fb_w, uint16_t *fb_h, int *fb_en);
+// Enable HPS FB plane and fill solid XRGB color. Returns 1 on success.
+int video_fb_fill_solid(uint32_t rgb888, int plane = 0);
 void video_menu_bg(int n, int idle = 0);
 int video_bg_has_picture();
 int video_chvt(int num);

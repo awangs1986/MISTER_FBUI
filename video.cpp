@@ -74,6 +74,12 @@ static volatile uint32_t *fb_base = 0;
 static int fb_enabled = 0;
 static int fb_width = 0;
 static int fb_height = 0;
+static int fb_use_rxb = 1;
+
+void video_fb_set_rxb(int enable)
+{
+	fb_use_rxb = enable ? 1 : 0;
+}
 static int fb_num = 0;
 static int brd_x = 0;
 static int brd_y = 0;
@@ -3582,7 +3588,8 @@ void video_fb_enable(int enable, int n)
 				}
 
 				//printf("Switch to Linux frame buffer\n");
-				spi_w((uint16_t)(FB_EN | FB_FMT_RxB | FB_FMT_8888)); // format, enable flag
+				uint16_t fmt = (uint16_t)(FB_EN | FB_FMT_8888 | (fb_use_rxb ? FB_FMT_RxB : 0));
+				spi_w(fmt); // format, enable flag
 				spi_w((uint16_t)fb_addr); // base address low word
 				spi_w(fb_addr >> 16);     // base address high word
 				spi_w(fb_width);          // frame width
@@ -3592,6 +3599,9 @@ void video_fb_enable(int enable, int n)
 				spi_w(yoff);                 // scaled top
 				spi_w(yoff + v_cur.item[5] - 1); // scaled bottom
 				spi_w(fb_width * 4);      // stride
+				printf("HPS FB enable: plane=%d fmt=%04x %dx%d scale=%d..%d x %d..%d\n",
+					n, fmt, fb_width, fb_height,
+					xoff, xoff + v_cur.item[1] - 1, yoff, yoff + v_cur.item[5] - 1);
 
 				//printf("Linux frame buffer: %dx%d, stride = %d bytes\n", fb_width, fb_height, fb_width * 4);
 				if (!fb_num)
@@ -3635,6 +3645,53 @@ int video_fb_state()
 	return fb_enabled;
 }
 
+int video_fb_readback(uint16_t *out_fmt, uint16_t *out_w, uint16_t *out_h, int *out_en)
+{
+	// UIO_GET_FB_PAR: cmd returns crc, then arx, ary, {LFB_EN,FB_EN,FB_FMT}, width, height
+	uint8_t crc = (uint8_t)spi_uio_cmd_cont(UIO_GET_FB_PAR);
+	uint16_t arx = spi_w(0);
+	uint16_t ary = spi_w(0);
+	uint16_t fmt = spi_w(0); // bit7=LFB_EN, bit6=FB_EN, bit5:0=FB_FMT
+	uint16_t w = spi_w(0);
+	uint16_t h = spi_w(0);
+	DisableIO();
+
+	if (out_fmt) *out_fmt = fmt;
+	if (out_w) *out_w = w;
+	if (out_h) *out_h = h;
+	// Prefer LFB_EN (HPS path); fall back to combined FB_EN
+	if (out_en) *out_en = !!(fmt & 0x80) || !!(fmt & 0x40);
+	(void)crc;
+	(void)arx;
+	(void)ary;
+	return 1;
+}
+
+int video_fb_fill_solid(uint32_t rgb888, int plane)
+{
+	if (!fb_base || fb_width <= 0 || fb_height <= 0)
+	{
+		printf("video_fb_fill_solid: no fb (%dx%d)\n", fb_width, fb_height);
+		return 0;
+	}
+	if (plane < 0 || plane > 2) plane = 0;
+
+	video_fb_enable(1, plane);
+	if (!fb_enabled)
+	{
+		printf("video_fb_fill_solid: core rejected HPS FB\n");
+		return 0;
+	}
+
+	volatile uint32_t *p = fb_base + (FB_SIZE * plane);
+	if (plane == 0) p += (4096 / 4);
+
+	int n = fb_width * fb_height;
+	for (int i = 0; i < n; i++) p[i] = rgb888;
+
+	printf("video_fb_fill_solid: plane=%d %dx%d color=%06x\n", plane, fb_width, fb_height, rgb888 & 0xFFFFFF);
+	return 1;
+}
 
 static void video_fb_config()
 {

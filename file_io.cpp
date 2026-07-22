@@ -67,16 +67,42 @@ static int iFirstEntry = 0;
 static char full_path[2100];
 uint8_t loadbuf[LOADBUF_SZ];
 
+static int flist_item_rows = 1;
+static int flist_page_override = 0;
+
+void flist_set_rows_per_item(int rows)
+{
+	flist_item_rows = (rows < 1) ? 1 : rows;
+}
+
+int flist_rows_per_item()
+{
+	return flist_item_rows;
+}
+
+void flist_set_page_override(int n)
+{
+	flist_page_override = (n < 0) ? 0 : n;
+}
+
+int flist_page_size()
+{
+	if (flist_page_override > 0) return flist_page_override;
+	int ps = OsdGetSize() / flist_item_rows;
+	return ps > 0 ? ps : 1;
+}
+
 static int flist_last_first_entry()
 {
-	int last = (int)DirItem.size() - OsdGetSize();
+	int last = (int)DirItem.size() - flist_page_size();
 	return last > 0 ? last : 0;
 }
 
 static void flist_center_selected()
 {
 	int count = (int)DirItem.size();
-	if (!count || OsdGetSize() <= 0)
+	int page = flist_page_size();
+	if (!count || page <= 0)
 	{
 		iSelectedEntry = 0;
 		iFirstEntry = 0;
@@ -88,19 +114,24 @@ static void flist_center_selected()
 
 	if (cfg.lookahead)
 	{
-		iFirstEntry = iSelectedEntry - (OsdGetSize() / 2);
+		iFirstEntry = iSelectedEntry - (page / 2);
 	}
 	else if (iSelectedEntry < iFirstEntry)
 	{
 		iFirstEntry = iSelectedEntry;
 	}
-	else if (iSelectedEntry >= iFirstEntry + OsdGetSize())
+	else if (iSelectedEntry >= iFirstEntry + page)
 	{
-		iFirstEntry = iSelectedEntry - OsdGetSize() + 1;
+		iFirstEntry = iSelectedEntry - page + 1;
 	}
 
 	if (iFirstEntry < 0) iFirstEntry = 0;
 	if (iFirstEntry > flist_last_first_entry()) iFirstEntry = flist_last_first_entry();
+}
+
+void flist_fix_view()
+{
+	flist_center_selected();
 }
 
 fileTYPE::fileTYPE()
@@ -1852,13 +1883,13 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 		}
 		else if (mode == SCANF_NEXT_PAGE)
 		{
-			iSelectedEntry += OsdGetSize();
+			iSelectedEntry += flist_page_size();
 			flist_center_selected();
 			return 0;
 		}
 		else if (mode == SCANF_PREV_PAGE)
 		{
-			iSelectedEntry -= OsdGetSize();
+			iSelectedEntry -= flist_page_size();
 			flist_center_selected();
 		}
 		else if (mode == SCANF_SET_ITEM)

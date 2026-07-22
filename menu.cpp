@@ -59,6 +59,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "cheats.h"
 #include "game_docs.h"
 #include "video.h"
+#include "fb_probe.h"
 #include "audio.h"
 #include "joymapping.h"
 #include "recent.h"
@@ -464,6 +465,9 @@ void SelectFile(const char* path, const char* pFileExt, int Options, unsigned ch
 			strcpy(selPath, home);
 		}
 	}
+
+	// Native CJK OSD list uses 2 OSD rows per entry.
+	flist_set_rows_per_item(2);
 
 	ScanDirectory(selPath, SCANF_INIT, pFileExt, Options);
 	AdjustDirectory(selPath);
@@ -1525,6 +1529,12 @@ void HandleUI(void)
 			       left, right, plus, minus);
 
 	// Ensure we clear out the file-selector-visible file on select or cancel
+	if (menustate == fs_MenuSelect || menustate == fs_MenuCancel)
+	{
+		fb_probe_red_end();
+		flist_set_rows_per_item(1);
+		flist_set_page_override(0);
+	}
 	if (cfg.log_file_entry)
 	{
 		if (menustate == fs_MenuSelect)
@@ -5348,6 +5358,17 @@ void HandleUI(void)
 	case MENU_FILE_SELECT1:
 		helptext_idx = (fs_Options & SCANO_UMOUNT) ? HELPTEXT_EJECT : (fs_Options & SCANO_CLEAR) ? HELPTEXT_CLEAR : 0;
 		OsdSetTitle((fs_Options & SCANO_CORES) ? "Cores" : "Select", 0);
+		// Smoke test: in-core ROM picker — F9-style HPS FB (OSD off, fullscreen color).
+		if (!(fs_Options & SCANO_CORES) && !is_menu())
+		{
+			if (fb_probe_red_begin())
+			{
+				menustate = MENU_FILE_SELECT2;
+				break;
+			}
+		}
+		else
+			fb_probe_red_end();
 		PrintDirectory(hold_cnt<2);
 		menustate = MENU_FILE_SELECT2;
 		if (cfg.log_file_entry && flist_nDirEntries())
@@ -5361,6 +5382,33 @@ void HandleUI(void)
 
 	case MENU_FILE_SELECT2:
 		menumask = 0;
+
+		// While probe is on: no OSD list — cycle colors until Menu/Select.
+		if (fb_probe_active())
+		{
+			fb_probe_red_refresh();
+			if (menu || select || back)
+			{
+				fb_probe_red_end();
+				if (menu || back)
+				{
+					menustate = fs_MenuCancel;
+					helptext_idx = 0;
+				}
+				else
+				{
+					// Select: dismiss probe and show normal file list.
+					PrintDirectory(1);
+					if (cfg.log_file_entry && flist_nDirEntries())
+					{
+						MakeFile("/tmp/CURRENTPATH", flist_SelectedItem()->altname);
+						MakeFile("/tmp/FULLPATH", selPath);
+						MakeFile("/tmp/FILESELECT", "active");
+					}
+				}
+			}
+			break;
+		}
 
 		if (c == KEY_BACKSPACE && (fs_Options & (SCANO_UMOUNT | SCANO_CLEAR)) && !strlen(filter))
 		{
@@ -5403,12 +5451,14 @@ void HandleUI(void)
 			}
 
 			if (!strcasecmp(fs_pFileExt, "RBF")) selPath[0] = 0;
+			fb_probe_red_end();
 			menustate = fs_MenuCancel;
 			helptext_idx = 0;
 		}
 
 		if (recent && recent_init((fs_Options & SCANO_CORES) ? -1 : (fs_Options & SCANO_UMOUNT) ? ioctl_index + 500 : ioctl_index))
 		{
+			fb_probe_red_end();
 			menustate = MENU_RECENT1;
 		}
 
@@ -5422,7 +5472,7 @@ void HandleUI(void)
 
 		if (flist_nDirEntries())
 		{
-			if (!helpstate || ((flist_iSelectedEntry() - flist_iFirstEntry() + 1) < OsdGetSize())) ScrollLongName(); // scrolls file name if longer than display line
+			if (!helpstate || ((flist_iSelectedEntry() - flist_iFirstEntry() + 1) < flist_page_size())) ScrollLongName(); // scrolls file name if longer than display line
 
 			if (c == KEY_HOME || c == KEY_TAB)
 			{
@@ -7767,7 +7817,9 @@ void ScrollLongName(void)
 		}
 	}
 
-	ScrollText(flist_iSelectedEntry() - flist_iFirstEntry(), flist_SelectedItem()->altname + off, 0, len, max_len, 1);
+	// Double-height list: map entry index to OSD line
+	int row = (flist_iSelectedEntry() - flist_iFirstEntry()) * flist_rows_per_item();
+	ScrollText(row, flist_SelectedItem()->altname + off, 0, len, max_len, 1);
 }
 
 // print directory contents
@@ -7776,11 +7828,18 @@ void PrintDirectory(int expand)
 	char s[40];
 	ScrollReset();
 
-	if (!cfg.browse_expand) expand = 0;
+	// Double-height entries for native 12px CJK (2 OSD rows each).
+	flist_set_rows_per_item(2);
+	OsdSetTextRowHeight(2);
+	const int row_h = flist_rows_per_item();
+	const int page = flist_page_size();
+
+	// Expand-to-next-line needs a spare OSD row; disable with double-height.
+	if (row_h > 1 || !cfg.browse_expand) expand = 0;
 
 	if (expand)
 	{
-		int k = flist_iFirstEntry() + OsdGetSize() - 1;
+		int k = flist_iFirstEntry() + page - 1;
 		if (flist_nDirEntries() && k == flist_iSelectedEntry() && k < flist_nDirEntries()
 			&& strlen(flist_DirItem(k)->altname) > 28 && !(!cfg.rbf_hide_datecode && flist_DirItem(k)->datecode[0])
 			&& flist_DirItem(k)->de.d_type != DT_DIR && k < flist_nDirEntries() - 1)
@@ -7790,9 +7849,10 @@ void PrintDirectory(int expand)
 		}
 	}
 
-	int i = 0;
+	int i = 0; // OSD row
+	int e = 0; // entry slot on page
 	int k = flist_iFirstEntry();
-	while(i < OsdGetSize())
+	while (e < page && i + row_h <= OsdGetSize())
 	{
 		char leftchar = 0;
 		memset(s, ' ', 32); // clear line buffer
@@ -7864,12 +7924,12 @@ void PrintDirectory(int expand)
 				len2 = 0;
 			}
 
-			if (!i && k) leftchar = 17;
-			if (i && k < flist_nDirEntries() - 1) leftchar = 16;
+			if (!e && k) leftchar = 17;
+			if (e == page - 1 && k < flist_nDirEntries() - 1) leftchar = 16;
 		}
 		else if(!flist_nDirEntries()) // selected directory is empty
 		{
-			if (!i) strcpy(s, "          No files!");
+			if (!e) strcpy(s, "          No files!");
 			if (home_dir && !filter[0])
 			{
 				if (i == 6) strcpy(s, "      Missing directory:");
@@ -7882,20 +7942,30 @@ void PrintDirectory(int expand)
 			}
 		}
 
-		int sel = (i == (flist_iSelectedEntry() - flist_iFirstEntry()));
+		int sel = (k == flist_iSelectedEntry());
 		OsdWriteOffset(i, s, sel, 0, 0, leftchar);
-		i++;
+		i += row_h;
 
 		if (sel && len2 && i < OsdGetSize())
 		{
 			len = strlen(flist_DirItem(k)->altname);
 			strcpy(s+1, flist_DirItem(k)->altname + len - len2);
 			OsdWriteOffset(i, s, sel, 0, 0, leftchar);
-			i++;
+			i += row_h;
 		}
 
 		k++;
+		e++;
 	}
+
+	// Clear any leftover OSD rows (single-line clears)
+	OsdSetTextRowHeight(1);
+	while (i < OsdGetSize())
+	{
+		OsdWrite(i, "", 0, 0);
+		i++;
+	}
+	// flist_rows_per_item stays at 2 for page navigation; text height restored for other menus.
 }
 
 static void set_text(const char *message, unsigned char code)

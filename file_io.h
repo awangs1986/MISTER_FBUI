@@ -55,6 +55,14 @@ direntext_t* flist_SelectedItem();
 char* flist_Path();
 char* flist_GetPrevNext(const char* base_path, const char* file, const char* ext, int next);
 
+// OSD lines per file-list entry (1=legacy, 2=double-height CJK). Affects page size.
+void flist_set_rows_per_item(int rows);
+int flist_rows_per_item();
+int flist_page_size();
+// Override page size (e.g. FB fullscreen list). 0 = derive from OsdGetSize()/rows.
+void flist_set_page_override(int n);
+void flist_fix_view();
+
 // scanning flags
 #define SCANF_INIT       0 // start search from beginning of directory
 #define SCANF_NEXT       1 // find next file in directory

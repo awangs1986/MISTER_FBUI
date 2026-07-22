@@ -40,6 +40,10 @@ char* OsdCoreNameGet();
 void OsdSetSize(int n);
 int OsdGetSize();
 
+// Text row height in OSD lines (1=legacy 8px, 2=double-height for native CJK).
+void OsdSetTextRowHeight(int h);
+int OsdGetTextRowHeight();
+
 #define OsdIsBig (OsdGetSize()>8)
 
 #endif

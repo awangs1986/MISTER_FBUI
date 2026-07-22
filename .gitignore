@@ -29,3 +29,5 @@ host
 .vs
 MiSTer
 /bin
+font/*.ttf
+font/*.otf

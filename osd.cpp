@@ -42,6 +42,7 @@ as rotated copies of the first 128 entries.  -- AMR
 #include "spi.h"
 
 #include "charrom.h"
+#include "font_cjk.h"
 #include "logo.h"
 #include "user_io.h"
 #include "hardware.h"
@@ -55,6 +56,7 @@ as rotated copies of the first 128 entries.  -- AMR
 #define OSD_CMD_DISABLE  0x40      // OSD disable command
 
 static int osd_size = 8;
+static int osd_text_row_h = 1;
 
 void OsdSetSize(int n)
 {
@@ -64,6 +66,16 @@ void OsdSetSize(int n)
 int OsdGetSize()
 {
 	return osd_size;
+}
+
+void OsdSetTextRowHeight(int h)
+{
+	osd_text_row_h = (h >= 2) ? 2 : 1;
+}
+
+int OsdGetTextRowHeight()
+{
+	return osd_text_row_h;
 }
 
 struct star
@@ -244,6 +256,7 @@ static void draw_title(const unsigned char *p)
 }
 
 // write a null-terminated string <s> to the OSD buffer starting at line <n>
+// When osd_text_row_h >= 2, draws across lines n and n+1 (16px tall) for native CJK.
 void OsdWriteOffset(unsigned char n, const char *s, unsigned char invert, unsigned char stipple, char offset, char leftchar, char usebg, int maxinv, int mininv)
 {
 	//printf("OsdWriteOffset(%d)\n", n);
@@ -253,10 +266,19 @@ void OsdWriteOffset(unsigned char n, const char *s, unsigned char invert, unsign
 	unsigned char stipplemask = 0xff;
 	int linelimit = OSDLINELEN;
 	int arrowmask = arrow;
+	const int double_h = (osd_text_row_h >= 2 && n + 1 < osd_size);
 	if (n == (osd_size-1) && (arrow & OSD_ARROW_RIGHT))
 		linelimit -= 22;
 
-	if (n && n < OsdGetSize() - 1) leftchar = 0;
+	if (double_h)
+	{
+		// Keep side arrows when this 2-line block is the first or last OSD rows.
+		if (n != 0 && (n + 1) != (OsdGetSize() - 1)) leftchar = 0;
+	}
+	else if (n && n < OsdGetSize() - 1)
+	{
+		leftchar = 0;
+	}
 
 	if (stipple) {
 		stipplemask = 0x55;
@@ -266,9 +288,14 @@ void OsdWriteOffset(unsigned char n, const char *s, unsigned char invert, unsign
 		stipple = 0;
 
 	osd_start(n);
+	if (double_h) osd_start(n + 1);
 
 	unsigned char xormask = 0;
 	unsigned char xorchar = 0;
+
+	// Dual-line buffer bases (absolute). Single-height still uses osdbufpos.
+	unsigned char *line0 = &osdbuf[n * 256];
+	unsigned char *line1 = double_h ? &osdbuf[(n + 1) * 256] : 0;
 
 	i = 0;
 	// send all characters in string to OSD
@@ -293,7 +320,27 @@ void OsdWriteOffset(unsigned char n, const char *s, unsigned char invert, unsign
 				p = &titlebuffer[(osd_size - 1 - n) * 8];
 			}
 
-			draw_title(p);
+			if (double_h)
+			{
+				osdbufpos = n * 256;
+				draw_title(p);
+				// Bottom stripe: next title slice (or same leftchar)
+				const unsigned char *pb;
+				if (leftchar)
+				{
+					pb = tmp;
+				}
+				else
+				{
+					pb = &titlebuffer[(osd_size - 1 - (n + 1)) * 8];
+				}
+				osdbufpos = (n + 1) * 256;
+				draw_title(pb);
+			}
+			else
+			{
+				draw_title(p);
+			}
 			i += 22;
 		}
 		else if (n == (osd_size-1) && (arrowmask & OSD_ARROW_LEFT))
@@ -321,45 +368,147 @@ void OsdWriteOffset(unsigned char n, const char *s, unsigned char invert, unsign
 		}
 		else
 		{
-			b = *s++;
-			if (!b) break;
+			if (!*s) break;
 
-			if (b == 0xb)
+			uint32_t cp = 0;
+			int adv = utf8_decode(s, &cp);
+			b = (unsigned char)cp;
+
+			if (cp == 0xb)
 			{
+				s += adv;
 				stipplemask ^= 0xAA;
 				stipple ^= 0xff;
 			}
-			else if (b == 0xc)
+			else if (cp == 0xc)
 			{
+				s += adv;
 				xorchar ^= 0xff;
 			}
-			else if (b == 0x0d || b == 0x0a)
+			else if (cp == 0x0d || cp == 0x0a)
 			{  // cariage return / linefeed, go to next line
-			   // increment line counter
+				s += adv;
+				// increment line counter
 				if (++n >= linelimit)
 					n = 0;
 
 				// send new line number to OSD
 				osd_start(n);
+				line0 = &osdbuf[n * 256];
+				line1 = 0;
 			}
-			else if (i<(linelimit - 8))
-			{  // normal character
+			else if (adv > 1 && cp >= 0x80)
+			{
+				// UTF-8 decoded wide character (CJK)
+				s += adv;
+				const uint16_t *glyph = font_cjk_get(cp);
+				int width = double_h ? FONT_CJK_WIDTH : 16;
+				if (i < (linelimit - width))
+				{
+					unsigned char c;
+					if (double_h)
+					{
+						for (c = 0; c < FONT_CJK_WIDTH; c++)
+						{
+							uint16_t col = glyph ? glyph[c] : 0;
+							// Place 12px glyph into 16px with top pad
+							uint16_t v = (uint16_t)(col << FONT_CJK_PAD_TOP);
+							uint8_t top = (uint8_t)(v & 0xFF);
+							uint8_t bot = (uint8_t)((v >> 8) & 0xFF);
+							if (!glyph)
+							{
+								// hollow box outline across 12x16
+								int edge = (c == 0 || c == FONT_CJK_WIDTH - 1);
+								top = edge ? 0xFF : 0x01;
+								bot = edge ? 0xFF : 0x80;
+							}
+							char bg0 = usebg ? framebuffer[n][i + c - 22] : 0;
+							char bg1 = usebg ? framebuffer[n + 1][i + c - 22] : 0;
+							line0[i + c] = (((top << offset) & stipplemask) ^ xormask ^ xorchar) | bg0;
+							line1[i + c] = (((bot << offset) & stipplemask) ^ xormask ^ xorchar) | bg1;
+							stipplemask ^= stipple;
+						}
+					}
+					else if (glyph)
+					{
+						// Legacy single-row path: squeeze low 8 bits of each of 12 cols, pad to 16
+						p = 0;
+						for (c = 0; c < 12; c++) {
+							uint8_t top = (uint8_t)(glyph[c] & 0xFF);
+							char bg = usebg ? framebuffer[n][i + c - 22] : 0;
+							osdbuf[osdbufpos++] = (((top << offset) & stipplemask) ^ xormask ^ xorchar) | bg;
+							stipplemask ^= stipple;
+						}
+						for (; c < 16; c++) {
+							char bg = usebg ? framebuffer[n][i + c - 22] : 0;
+							osdbuf[osdbufpos++] = xormask | bg;
+						}
+					}
+					else
+					{
+						// Missing glyph: two hollow boxes
+						for (int rep = 0; rep < 2; rep++)
+						{
+							p = &charfont[0x8C][0];
+							for (c = 0; c < 8; c++) {
+								char bg = usebg ? framebuffer[n][i + rep * 8 + c - 22] : 0;
+								osdbuf[osdbufpos++] = (((*p++ << offset) & stipplemask) ^ xormask ^ xorchar) | bg;
+								stipplemask ^= stipple;
+							}
+						}
+					}
+					i += width;
+					if (!double_h) { /* osdbufpos already advanced */ }
+					else { /* absolute write via line0/line1 */ }
+				}
+			}
+			else if (i < (linelimit - 8))
+			{  // normal single-byte character / legacy OSD icon
+				s += adv;
 				unsigned char c;
 				p = &charfont[b][0];
-				for (c = 0; c<8; c++) {
-					char bg = usebg ? framebuffer[n][i+c-22] : 0;
-					osdbuf[osdbufpos++] = (((*p++ << offset)&stipplemask) ^ xormask ^ xorchar) | bg;
-					stipplemask ^= stipple;
+				if (double_h)
+				{
+					for (c = 0; c < 8; c++) {
+						char bg0 = usebg ? framebuffer[n][i + c - 22] : 0;
+						char bg1 = usebg ? framebuffer[n + 1][i + c - 22] : 0;
+						// Keep ASCII on top 8px; bottom row matches invert fill
+						line0[i + c] = (((*p++ << offset) & stipplemask) ^ xormask ^ xorchar) | bg0;
+						line1[i + c] = xormask | bg1;
+						stipplemask ^= stipple;
+					}
+				}
+				else
+				{
+					for (c = 0; c<8; c++) {
+						char bg = usebg ? framebuffer[n][i+c-22] : 0;
+						osdbuf[osdbufpos++] = (((*p++ << offset)&stipplemask) ^ xormask ^ xorchar) | bg;
+						stipplemask ^= stipple;
+					}
 				}
 				i += 8;
+			}
+			else
+			{
+				break;
 			}
 		}
 	}
 
 	for (; i < linelimit; i++) // clear end of line
 	{
-		char bg = usebg ? framebuffer[n][i-22] : 0;
-		osdbuf[osdbufpos++] = xormask | bg;
+		if (double_h)
+		{
+			char bg0 = usebg ? framebuffer[n][i - 22] : 0;
+			char bg1 = usebg ? framebuffer[n + 1][i - 22] : 0;
+			line0[i] = xormask | bg0;
+			line1[i] = xormask | bg1;
+		}
+		else
+		{
+			char bg = usebg ? framebuffer[n][i-22] : 0;
+			osdbuf[osdbufpos++] = xormask | bg;
+		}
 	}
 
 	if (n == (osd_size-1) && (arrowmask & OSD_ARROW_RIGHT))

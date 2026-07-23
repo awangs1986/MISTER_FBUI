@@ -64,7 +64,8 @@ flowchart LR
 
 - `tools/GamelistEditor` 可从 Libretro Thumbnails 下载 `Named_Snaps` 游戏截图；
 - 图片冲突时可选择覆盖已有图片，或跳过已有图片只补缺失项；
-- 游戏截图仍按 ROM 基础文件名保存到 `games/<system>/images/`，与现有 gamelist 路径兼容。
+- 普通主机截图按 ROM 基础文件名保存到 `games/<system>/images/`，与现有 gamelist 路径兼容；
+- 工具的主机列表与 FBUI 一致，只显示含受支持 ROM 的系统；所有 MRA 街机统一显示为 `Arcade`，媒体位于 `/_Arcade/images/`。
 
 ### DDR3 缓存策略
 

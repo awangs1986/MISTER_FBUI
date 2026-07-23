@@ -45,6 +45,7 @@ font/*.otf
 /tools/GamelistEditor/obj/
 /tools/GamelistEditor/publish/
 /tools/GamelistEditor/publish-snapshots/
+/tools/GamelistEditor/publish-romonly/
 /tools/GamelistEditor/*.exe
 /tools/mister_rom_hashes.json
 /tools/rename_plan.json

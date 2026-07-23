@@ -1159,7 +1159,10 @@ static void find_media(const char *game, char *image_out, size_t isz,
 	if (video_out && vsz) video_out[0] = 0;
 
 	char dir[2048], base[NAME_LEN];
-	cur_dir_path(dir, sizeof(dir));
+	if (cur_map && cur_map->kind == SYS_KIND_ARCADE)
+		snprintf(dir, sizeof(dir), "%s/_Arcade", getRootDir());
+	else
+		cur_dir_path(dir, sizeof(dir));
 	snprintf(base, sizeof(base), "%s", game);
 	char *dot = strrchr(base, '.');
 	if (dot) *dot = 0;

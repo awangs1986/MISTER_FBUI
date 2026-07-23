@@ -33,11 +33,38 @@ public partial class Form1 : Form
     private string _tempPreview = "";
 
     private const string GamesRoot = "/media/fat/games";
+    private const string ArcadeRoot = "/media/fat/_Arcade";
+
+    // Keep this list aligned with fbui.cpp::sys_maps. A system is offered only
+    // when its directory contains at least one file with a supported ROM type.
+    private static readonly Dictionary<string, HashSet<string>> SystemRomExtensions =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["NES"] = Exts("nes", "fds", "nsf"),
+            ["SNES"] = Exts("sfc", "smc", "bin", "bs"),
+            ["MegaDrive"] = Exts("md", "bin", "gen"),
+            ["Genesis"] = Exts("md", "bin", "gen"),
+            ["SMS"] = Exts("sms", "sg", "gg"),
+            ["GBA"] = Exts("gba"),
+            ["GAMEBOY"] = Exts("gb", "gbc"),
+            ["TGFX16"] = Exts("pce", "sgx"),
+            ["TGFX16-CD"] = Exts("cue", "chd"),
+            ["PSX"] = Exts("cue", "chd", "exe"),
+            ["MegaCD"] = Exts("cue", "chd"),
+            ["N64"] = Exts("n64", "z64", "v64"),
+            ["Saturn"] = Exts("cue", "chd"),
+            ["NeoGeo"] = Exts("neo"),
+            ["Atari2600"] = Exts("a26"),
+            ["Atari7800"] = Exts("a78", "a26"),
+            ["AtariLynx"] = Exts("lnx"),
+            ["WonderSwan"] = Exts("ws", "wsc"),
+            ["C64"] = Exts("d64", "t64", "prg", "crt")
+        };
 
     public Form1()
     {
         InitializeComponent();
-        Text = "MiSTer Gamelist 编辑器 — 截图版 2026.07.24b（括号外匹配）";
+        Text = "MiSTer Gamelist 编辑器 — 2026.07.24c（仅有ROM + 统一Arcade）";
         MinimumSize = new Size(900, 560);
         Width = 1180;
         Height = 760;
@@ -274,7 +301,19 @@ public partial class Form1 : Form
         return ip.TrimEnd('/');
     }
 
-    private string SystemDir(string system) => $"{GamesRoot}/{system}";
+    private static HashSet<string> Exts(params string[] values) =>
+        new(values, StringComparer.OrdinalIgnoreCase);
+
+    private static bool IsRomFile(string system, string file)
+    {
+        if (system.Equals("Arcade", StringComparison.OrdinalIgnoreCase))
+            return Path.GetExtension(file).Equals(".mra", StringComparison.OrdinalIgnoreCase);
+        return SystemRomExtensions.TryGetValue(system, out var exts) &&
+               exts.Contains(Path.GetExtension(file).TrimStart('.'));
+    }
+
+    private string SystemDir(string system) =>
+        system.Equals("Arcade", StringComparison.OrdinalIgnoreCase) ? ArcadeRoot : $"{GamesRoot}/{system}";
     private string GamelistPath(string system) => $"{SystemDir(system)}/gamelist.xml";
 
     private static string? LibretroPlaylist(string misterSystem) =>
@@ -287,13 +326,27 @@ public partial class Form1 : Form
             UseWaitCursor = true;
             _lblStatus.Text = $"正在连接 {Host()} …";
             var dirs = await FtpListNamesAsync($"{GamesRoot}/");
-            var systems = dirs
+            var candidates = dirs
                 .Where(d => !string.IsNullOrWhiteSpace(d) && !d.StartsWith('.'))
                 .Select(NormalizeName)
                 .Where(d => d.Length > 0 && d is not ("." or ".."))
+                .Where(d => SystemRomExtensions.ContainsKey(d))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .OrderBy(d => d, StringComparer.OrdinalIgnoreCase)
                 .ToList();
+
+            var systems = new List<string>();
+            foreach (var system in candidates)
+            {
+                _lblStatus.Text = $"正在检查 {system} 是否有 ROM …";
+                var files = await FtpListFilesAsync($"{GamesRoot}/{system}/");
+                if (files.Any(f => IsRomFile(system, f))) systems.Add(system);
+            }
+
+            // MiSTer exposes all MRA games through one synthetic Arcade entry.
+            var arcadeFiles = await FtpListFilesAsync($"{ArcadeRoot}/");
+            if (arcadeFiles.Any(f => IsRomFile("Arcade", f))) systems.Add("Arcade");
+            systems.Sort(StringComparer.OrdinalIgnoreCase);
 
             if (systems.Count == 0)
                 throw new InvalidOperationException($"FTP 下列不出 {GamesRoot}/，请检查 IP/账号或 FTP 是否开启。");
@@ -363,6 +416,7 @@ public partial class Form1 : Form
             var imageBases = ToBaseNameSet(images, new[] { ".png", ".jpg", ".jpeg", ".webp" });
             var videoBases = ToBaseNameSet(videos, new[] { ".mp4", ".mkv", ".avi", ".webm" });
             var romSet = roms
+                .Where(f => IsRomFile(system, f))
                 .Where(f => !f.Equals("gamelist.xml", StringComparison.OrdinalIgnoreCase))
                 .Where(f => !f.EndsWith(".bak", StringComparison.OrdinalIgnoreCase))
                 .Where(f => !f.Equals("images", StringComparison.OrdinalIgnoreCase))

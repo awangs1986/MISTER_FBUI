@@ -77,6 +77,13 @@ internal static class ThumbMatch
     public static bool TryGetSys(string misterSystem, out SysInfo info) =>
         Systems.TryGetValue(misterSystem, out info!);
 
+    public static bool UsesOutsideParenthesesOnly(string misterSystem) =>
+        misterSystem.Equals("NeoGeo", StringComparison.OrdinalIgnoreCase) ||
+        misterSystem.Equals("AES", StringComparison.OrdinalIgnoreCase) ||
+        misterSystem.Equals("CPS1", StringComparison.OrdinalIgnoreCase) ||
+        misterSystem.Equals("CPS2", StringComparison.OrdinalIgnoreCase) ||
+        misterSystem.Equals("Arcade", StringComparison.OrdinalIgnoreCase);
+
     public static string? FindDataRoot()
     {
         if (_dataRoot != null) return _dataRoot;
@@ -113,6 +120,17 @@ internal static class ThumbMatch
             if (string.IsNullOrWhiteSpace(s)) return;
             s = s.Trim();
             if (seen.Add(s)) ordered.Add(s);
+        }
+
+        // Arcade/NeoGeo ROM packs append set, revision and short set names in
+        // parentheses. Libretro screenshots are keyed by the human title, so
+        // only the text outside every parenthesized segment participates.
+        if (UsesOutsideParenthesesOnly(misterSystem))
+        {
+            var outside = Regex.Replace(baseName, @"\s*\([^)]*\)", " ");
+            outside = Regex.Replace(outside, @"\s+", " ").Trim();
+            Add(outside);
+            return ordered;
         }
 
         // 1) local override

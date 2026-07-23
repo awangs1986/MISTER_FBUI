@@ -37,7 +37,7 @@ public partial class Form1 : Form
     public Form1()
     {
         InitializeComponent();
-        Text = "MiSTer Gamelist 编辑器 — 截图版 2026.07.24";
+        Text = "MiSTer Gamelist 编辑器 — 截图版 2026.07.24b（括号外匹配）";
         MinimumSize = new Size(900, 560);
         Width = 1180;
         Height = 760;
@@ -516,10 +516,13 @@ public partial class Form1 : Form
 
         var datRoot = ThumbMatch.FindDataRoot();
         var hasDat = ThumbMatch.TryGetSys(_currentSystem, out var sysInfo) && sysInfo.DatRelativePath != null && datRoot != null;
+        var outsideOnly = ThumbMatch.UsesOutsideParenthesesOnly(_currentSystem);
         var confirm = MessageBox.Show(this,
             $"将为 {_currentSystem} 的 {candidates.Count} 个 ROM\n从 Libretro「{thumbType}」下载并上传到 MiSTer。\n\n" +
             $"文件冲突：{(overwriteExisting ? "覆盖已有图片" : "跳过已有图片")}\n" +
-            $"匹配顺序：本地覆盖表 → {(hasDat ? "ROM CRC 查 DAT" : "无 DAT（跳过哈希）")} → 去后缀文件名 → setname\n" +
+            (outsideOnly
+                ? "匹配规则：删除所有括号及括号内容，只按括号外游戏名匹配\n"
+                : $"匹配顺序：本地覆盖表 → {(hasDat ? "ROM CRC 查 DAT" : "无 DAT（跳过哈希）")} → 去后缀文件名 → setname\n") +
             $"数据目录：{(datRoot ?? "未找到 tools/data")}\n继续？",
             "下载缩略图", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
         if (confirm != DialogResult.Yes) return;

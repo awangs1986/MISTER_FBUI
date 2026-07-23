@@ -60,6 +60,12 @@ flowchart LR
 - 主程序读取最新预览帧，不让视频解码器直接阻塞输入循环；
 - 当前实现仍以稳定性验证为主，未来会增加首帧缓存、帧环形缓冲和解码进程复用。
 
+### 游戏截图下载
+
+- `tools/GamelistEditor` 可从 Libretro Thumbnails 下载 `Named_Snaps` 游戏截图；
+- 图片冲突时可选择覆盖已有图片，或跳过已有图片只补缺失项；
+- 游戏截图仍按 ROM 基础文件名保存到 `games/<system>/images/`，与现有 gamelist 路径兼容。
+
 ### DDR3 缓存策略
 
 DE10-Nano 物理上有 1GB HPS DDR3，但当前 MiSTer Linux 启动布局在实机上只向 ARM 暴露约 492MB。项目读取 `/proc/meminfo` 的 `MemAvailable` 动态确定缓存规模，而不是按纸面容量固定吃满内存：

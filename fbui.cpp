@@ -242,6 +242,34 @@ static void fill_rect(int x, int y, int w, int h, uint32_t color)
 	dirty_add(x, y, x + w, y + h);
 }
 
+// Alpha-composite a solid color over the current shadow contents.
+static void blend_rect(int x, int y, int w, int h, uint32_t color, uint8_t alpha)
+{
+	if (!alpha) return;
+	if (alpha == 255) { fill_rect(x, y, w, h, color); return; }
+	if (x < 0) { w += x; x = 0; }
+	if (y < 0) { h += y; y = 0; }
+	if (x + w > scr_w) w = scr_w - x;
+	if (y + h > scr_h) h = scr_h - y;
+	if (w <= 0 || h <= 0) return;
+
+	uint32_t sr = (color >> 16) & 0xFF, sg = (color >> 8) & 0xFF, sb = color & 0xFF;
+	uint32_t inv = 255 - alpha;
+	for (int j = 0; j < h; j++)
+	{
+		uint32_t *p = shadow + (y + j) * scr_w + x;
+		for (int i = 0; i < w; i++, p++)
+		{
+			uint32_t d = *p;
+			uint32_t r = (sr * alpha + ((d >> 16) & 0xFF) * inv) / 255;
+			uint32_t g = (sg * alpha + ((d >> 8) & 0xFF) * inv) / 255;
+			uint32_t b = (sb * alpha + (d & 0xFF) * inv) / 255;
+			*p = (r << 16) | (g << 8) | b;
+		}
+	}
+	dirty_add(x, y, x + w, y + h);
+}
+
 // copy a region of the static background layer back into the shadow buffer
 static void bg_restore(int x, int y, int w, int h)
 {
@@ -411,6 +439,7 @@ static pid_t prev_pid = -1;
 static int ui_scale;
 static int header_h, footer_h, row_h, list_x, list_y, list_w, list_rows;
 static int panel_x, panel_y, panel_w, panel_h;
+static int game_backdrop_active;
 // CRTs commonly overscan. Keep the complete 240p composition inside this inset.
 static int safe_l, safe_t, safe_r, safe_b;
 
@@ -1165,6 +1194,25 @@ static void find_media(const char *game, char *image_out, size_t isz,
 	// multi-thousand-entry) XML on every selection.
 }
 
+// Draw the selected game's screenshot behind the browser. The image fills
+// the main safe viewport while preserving aspect ratio; overflow is cropped.
+static int render_game_backdrop_layer(void)
+{
+	if (ui_level != LV_GAMES || !item_cnt || sel < 0 || sel >= item_cnt || items[sel].is_dir)
+		return 0;
+
+	char image[2400] = "";
+	find_media(items[sel].name, image, sizeof(image), NULL, 0);
+	if (!image[0]) return 0;
+
+	int x = safe_l;
+	int y = safe_t;
+	int w = scr_w - safe_l - safe_r;
+	int h = scr_h - safe_t - safe_b - footer_h - 4;
+	if (w <= 0 || h <= 0) return 0;
+	return theme_blit_image_cover(bglayer, scr_w, scr_h, image, x, y, w, h);
+}
+
 // ---------------------------------------------------------------------------
 // Video preview (ffmpeg soft-decode → /tmp/fbui_prev.png, then blit)
 // ---------------------------------------------------------------------------
@@ -1412,7 +1460,13 @@ static void render_row(int row)
 	int y = list_y + row * row_h;
 
 	bg_restore(list_x, y, list_w, row_h);
-	if (idx == sel) fill_rect(list_x, y, list_w, row_h, st.sel_bg);
+	if (game_backdrop_active)
+		blend_rect(list_x, y, list_w, row_h, 0x000000, 158);
+	if (idx == sel)
+	{
+		if (game_backdrop_active) blend_rect(list_x, y, list_w, row_h, st.sel_bg, 210);
+		else fill_rect(list_x, y, list_w, row_h, st.sel_bg);
+	}
 
 	if (idx >= item_cnt) return;
 
@@ -1831,6 +1885,11 @@ static void render_showcase(void)
 static void render_panel()
 {
 	if (st.showcase) return;
+	if (game_backdrop_active)
+	{
+		preview_stop();
+		return;
+	}
 	if (st.use_theme)
 	{
 		// md_image slot from the theme, or a default right-side box
@@ -1972,6 +2031,7 @@ static void render_panel()
 static void render_full()
 {
 	render_bglayer();
+	game_backdrop_active = render_game_backdrop_layer();
 	bg_restore(0, 0, scr_w, scr_h);
 	if (st.showcase)
 	{
@@ -2282,6 +2342,15 @@ static void move_sel(int delta)
 		render_row(old - scroll_top);
 		render_row(sel - scroll_top);
 		render_scrollbar();
+	}
+	if (ui_level == LV_GAMES)
+	{
+		// The selected screenshot is part of bglayer, so changing selection
+		// requires one complete composition rather than a right-panel repaint.
+		need_full_redraw = 1;
+		need_list_redraw = 0;
+		need_panel_redraw = 0;
+		return;
 	}
 	need_panel_redraw = 1;
 	render_header(); // update counter

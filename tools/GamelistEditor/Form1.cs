@@ -14,11 +14,11 @@ public partial class Form1 : Form
     private readonly Button _btnConnect = new();
     private readonly ComboBox _cboSystem = new();
     private readonly ComboBox _cboThumbType = new();
+    private readonly ComboBox _cboImageConflict = new();
     private readonly Button _btnReload = new();
     private readonly Button _btnSave = new();
     private readonly Button _btnFetchThumbs = new();
     private readonly CheckBox _chkOnlyRom = new();
-    private readonly CheckBox _chkSkipExisting = new();
     private readonly DataGridView _grid = new();
     private readonly PictureBox _preview = new();
     private readonly Label _lblStatus = new();
@@ -165,10 +165,22 @@ public partial class Form1 : Form
         _cboThumbType.DropDownStyle = ComboBoxStyle.DropDownList;
         _cboThumbType.Items.Clear();
         _cboThumbType.Items.AddRange(new object[] { "Named_Boxarts", "Named_Titles", "Named_Snaps" });
-        _cboThumbType.SelectedIndex = 0;
+        // Screenshots suit FBUI's full-bleed game browser better than box art.
+        _cboThumbType.SelectedIndex = 2;
         _cboThumbType.Width = 140;
         _cboThumbType.Margin = new Padding(2, 4, 8, 0);
         row2.Controls.Add(_cboThumbType);
+        row2.Controls.Add(MakeLbl("冲突"));
+        _cboImageConflict.DropDownStyle = ComboBoxStyle.DropDownList;
+        _cboImageConflict.Items.AddRange(new object[]
+        {
+            "覆盖已有图片（全部替换）",
+            "跳过已有图片（只补缺）"
+        });
+        _cboImageConflict.SelectedIndex = 0;
+        _cboImageConflict.Width = 190;
+        _cboImageConflict.Margin = new Padding(2, 4, 8, 0);
+        row2.Controls.Add(_cboImageConflict);
 
         ConfigureAsAutoButton(_btnReload, "刷新", 60);
         ConfigureAsAutoButton(_btnSave, "保存覆盖", 88);
@@ -196,14 +208,9 @@ public partial class Form1 : Form
         _chkOnlyRom.Margin = new Padding(4, 6, 12, 0);
         _chkOnlyRom.CheckedChanged += (_, _) => RefreshGrid();
         row3.Controls.Add(_chkOnlyRom);
-        _chkSkipExisting.Text = "跳过已有图（只补缺）";
-        _chkSkipExisting.AutoSize = true;
-        _chkSkipExisting.Checked = true;
-        _chkSkipExisting.Margin = new Padding(4, 6, 12, 0);
-        row3.Controls.Add(_chkSkipExisting);
         var hint = new Label
         {
-            Text = "按 ROM 英文文件名匹配 Libretro；中文/改版名库中常无图",
+            Text = "建议图类型选 Named_Snaps；覆盖模式可将旧封面批量替换为游戏截图",
             AutoSize = true,
             ForeColor = Color.DimGray,
             Margin = new Padding(4, 8, 0, 0)
@@ -494,14 +501,15 @@ public partial class Form1 : Form
             return;
         }
 
-        var thumbType = _cboThumbType.SelectedItem as string ?? "Named_Boxarts";
+        var thumbType = _cboThumbType.SelectedItem as string ?? "Named_Snaps";
+        var overwriteExisting = _cboImageConflict.SelectedIndex == 0;
         var candidates = _rows.Where(r => r.HasRom).ToList();
-        if (_chkSkipExisting.Checked)
+        if (!overwriteExisting)
             candidates = candidates.Where(r => !r.HasImage).ToList();
 
         if (candidates.Count == 0)
         {
-            MessageBox.Show(this, "没有需要下载的条目（勾选「只补缺」时已有图的会跳过）。",
+            MessageBox.Show(this, "没有需要下载的条目（跳过模式下已有图片不会重复下载）。",
                 "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -510,6 +518,7 @@ public partial class Form1 : Form
         var hasDat = ThumbMatch.TryGetSys(_currentSystem, out var sysInfo) && sysInfo.DatRelativePath != null && datRoot != null;
         var confirm = MessageBox.Show(this,
             $"将为 {_currentSystem} 的 {candidates.Count} 个 ROM\n从 Libretro「{thumbType}」下载并上传到 MiSTer。\n\n" +
+            $"文件冲突：{(overwriteExisting ? "覆盖已有图片" : "跳过已有图片")}\n" +
             $"匹配顺序：本地覆盖表 → {(hasDat ? "ROM CRC 查 DAT" : "无 DAT（跳过哈希）")} → 去后缀文件名 → setname\n" +
             $"数据目录：{(datRoot ?? "未找到 tools/data")}\n继续？",
             "下载缩略图", MessageBoxButtons.YesNo, MessageBoxIcon.Question);

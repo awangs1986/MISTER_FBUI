@@ -446,7 +446,10 @@ static void layout_compute()
 		list_rows = (scr_h - safe_b - footer_h - 4 - list_y) / row_h;
 		if (list_rows < 1) list_rows = 1;
 		panel_x = safe_l + (scr_w - safe_l - safe_r) * 60 / 100;
-		panel_y = list_y;
+		// Game media may use the otherwise empty upper-right band. Portrait
+		// covers are height-limited, so extending upward makes them materially
+		// larger without narrowing the text list or distorting aspect ratio.
+		panel_y = (ui_level == LV_GAMES) ? (safe_t + 8) : list_y;
 		panel_w = scr_w - safe_r - panel_x - 8;
 		panel_h = scr_h - safe_b - footer_h - 4 - panel_y;
 		return;

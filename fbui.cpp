@@ -1733,7 +1733,9 @@ static void render_showcase_labels(entry_t *e, int have_logo, int lx, int ly, in
 	// Always show the system title. Logos alone are often icon-only / hard to
 	// read, so hiding text when a logo exists left some systems untitled.
 	const char *label = e->disp[0] ? e->disp : e->name;
-	int ny = ly + lh + (ui_lowres ? 2 : scr_h * 2 / 100);
+	// Leave a real gap above the 240p footer. The CRT-safe layout has very
+	// little vertical slack, so lift the title+counter group by eight pixels.
+	int ny = ly + lh + (ui_lowres ? -6 : scr_h * 2 / 100);
 	if (!have_logo)
 	{
 		int px = ui_lowres ? 32 : st.font_px * 2;
@@ -1752,6 +1754,11 @@ static void render_showcase_labels(entry_t *e, int have_logo, int lx, int ly, in
 // Avoids a full 1080p dirty flush on every tick (that was the main stall).
 static void render_showcase_scrub(void)
 {
+	// At 240p the visible background is selection-specific, while bglayer is
+	// only the static theme. Restoring a narrow title strip from bglayer creates
+	// a conspicuous black flash across the counter. Keep the current complete
+	// frame during navigation and repaint once after the 140ms settle timer.
+	if (ui_lowres) return;
 	if (!item_cnt || sel >= item_cnt) return;
 	entry_t *e = &items[sel];
 	int lx, ly, lw, lh;

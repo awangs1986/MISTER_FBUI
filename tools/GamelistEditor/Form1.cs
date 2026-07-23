@@ -37,7 +37,7 @@ public partial class Form1 : Form
     public Form1()
     {
         InitializeComponent();
-        Text = "MiSTer Gamelist 编辑器";
+        Text = "MiSTer Gamelist 编辑器 — 截图版 2026.07.24";
         MinimumSize = new Size(900, 560);
         Width = 1180;
         Height = 760;
@@ -538,6 +538,7 @@ public partial class Form1 : Form
         var fail = 0;
         var done = 0;
         string? lastFail = null;
+        string? lastMissUrl = null;
         using var ftpGate = new SemaphoreSlim(1, 1);
 
         try
@@ -578,6 +579,7 @@ public partial class Form1 : Form
                     foreach (var tryName in names)
                     {
                         var url = ThumbMatch.BuildThumbUrl(playlist, thumbType, tryName);
+                        lastMissUrl = url;
                         using var resp = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
                         if (resp.StatusCode == HttpStatusCode.NotFound)
                             continue;
@@ -640,7 +642,8 @@ public partial class Form1 : Form
                       $"已写入 /media/fat/games/{_currentSystem}/images/";
             if (ok == 0 && miss > 0)
                 msg += "\n\n提示：无图 = Libretro 没有对应缩略图（不是上传失败）。\n" +
-                       "可在 tools/data/thumb_overrides.json 为个别 ROM 补映射。";
+                       "可在 tools/data/thumb_overrides.json 为个别 ROM 补映射。" +
+                       (lastMissUrl != null ? "\n最后尝试地址：\n" + lastMissUrl : "");
             if (fail > 0 && lastFail != null)
                 msg += "\n\n最后一次失败原因:\n" + lastFail;
             MessageBox.Show(this, msg, "下载结束", MessageBoxButtons.OK,

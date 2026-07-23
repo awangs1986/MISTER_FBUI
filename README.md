@@ -43,7 +43,7 @@ flowchart LR
 ### 中文字体
 
 - 1080P/高清模式使用主题 TTF 和 FreeType 抗锯齿渲染；
-- 240P 模式强制使用 GNU Unifont 16×16 点阵，以整数 2× 放大为 32px，不经过插值；
+- 240P 中文使用 GNU Unifont 原生 16×16 点阵；英文、数字和符号使用 MiSTer 内置 8×8 点阵并以整数 2× 放大为 16×16；
 - 缺少 Unifont 字形时使用内置 CJK/OSD 点阵作为保底；
 - 两套字体由 framebuffer 高度自动选择，不依赖主题是否为 CRT 做过适配。
 

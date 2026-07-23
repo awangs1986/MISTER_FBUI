@@ -184,6 +184,7 @@ const uint8_t *fbui_hexfont_get(uint32_t cp)
 static uint32_t *shadow = 0;
 static uint32_t *bglayer = 0; // fully rendered static layer (gradient or theme)
 static int scr_w = 0, scr_h = 0;
+static int ui_lowres = 0;
 static int dirty_x0, dirty_y0, dirty_x1, dirty_y1; // x1/y1 exclusive
 
 static void dirty_reset()
@@ -263,6 +264,18 @@ static void put_px(int x, int y, uint32_t color, int s)
 // scale s: glyph cell is 16*s px tall. Returns x advance.
 static int draw_glyph(int x, int y, uint32_t cp, uint32_t color, int s)
 {
+	// Dedicated 240p Latin face: MiSTer's built-in 8x8 font at exact 2x.
+	// It shares a 16x16 cell with native-size Unifont CJK glyphs.
+	if (ui_lowres && cp < 0x80)
+	{
+		const unsigned char *g = charfont[cp & 0x7F];
+		for (int col = 0; col < 8; col++)
+			for (int row = 0; row < 8; row++)
+				if (g[col] & (1 << row))
+					fill_rect(x + col * 2, y + row * 2, 2, 2, color);
+		return 16;
+	}
+
 	const uint8_t *rec = fbui_hexfont_get(cp);
 	if (rec)
 	{
@@ -329,12 +342,13 @@ static int draw_text(int x, int y, const char *str, uint32_t color, int s, int m
 	{
 		uint32_t cp;
 		p += utf8_decode(p, &cp);
-		int adv = (cp < 0x80 ? 8 : 16) * s;
+		int adv = ui_lowres ? 16 : (cp < 0x80 ? 8 : 16) * s;
 		if (max_w && cx + adv > max_w)
 		{
 			// ellipsis
 			if (max_w >= cx + 6 * s)
-				for (int i = 0; i < 3; i++) fill_rect(x + cx + i * 2 * s + s, y + 14 * s, s, s, color);
+				for (int i = 0; i < 3; i++) fill_rect(x + cx + i * 2 * s + s,
+					y + (ui_lowres ? 14 : 14 * s), s, s, color);
 			break;
 		}
 		cx += draw_glyph(x + cx, y, cp, color, s);
@@ -350,7 +364,7 @@ static int text_width(const char *str, int s)
 	{
 		uint32_t cp;
 		p += utf8_decode(p, &cp);
-		w += (cp < 0x80 ? 8 : 16) * s;
+		w += ui_lowres ? 16 : (cp < 0x80 ? 8 : 16) * s;
 	}
 	return w;
 }
@@ -395,7 +409,6 @@ static pid_t prev_pid = -1;
 
 // layout (computed from scr_w/h)
 static int ui_scale;
-static int ui_lowres;
 static int header_h, footer_h, row_h, list_x, list_y, list_w, list_rows;
 static int panel_x, panel_y, panel_w, panel_h;
 // CRTs commonly overscan. Keep the complete 240p composition inside this inset.
@@ -435,11 +448,11 @@ static void layout_compute()
 
 	if (ui_lowres)
 	{
-		// Dedicated 240p geometry: 32px CJK in 36px rows, but compact chrome.
-		// At 640x240 this leaves three visible list rows plus a usable panel.
-		header_h = 36;
-		footer_h = 36;
-		row_h = 36;
+		// Dedicated 240p geometry: unified 16x16 bitmap cells in 22px rows.
+		// At 640x240 this leaves seven visible list rows plus a large media panel.
+		header_h = 24;
+		footer_h = 24;
+		row_h = 22;
 		list_x = safe_l + 8;
 		list_y = safe_t + header_h + 4;
 		list_w = (scr_w - safe_l - safe_r) * 58 / 100 - 8;
@@ -584,7 +597,7 @@ static void theme_apply()
 			"system-year,system-description,system-count,system-count-single,"
 			"system-count-null");
 		st.font_px = scr_h / 28;
-		if (st.font_px < (ui_lowres ? 32 : 12)) st.font_px = (ui_lowres ? 32 : 12);
+		if (st.font_px < (ui_lowres ? 16 : 12)) st.font_px = (ui_lowres ? 16 : 12);
 		st.have_panel = 0;
 	}
 	else
@@ -600,9 +613,7 @@ static void theme_apply()
 			st.font_px = ls.font_px;
 			st.list_align = ls.align;
 		}
-		// Theme font sizes are designed for 720/1080-line displays.  Make the
-		// CJK list glyphs exactly 2x their old 16px 240p size.
-		if (ui_lowres && st.font_px < 32) st.font_px = 32;
+		if (ui_lowres) st.font_px = 16;
 	}
 	st.use_theme = 1;
 }
@@ -668,7 +679,7 @@ static int ui_text(int x, int y, const char *s, uint32_t color, int px, int max_
 		return w;
 	}
 
-	int sc = ui_lowres ? 2 : ((px >= 28) ? 2 : 1);
+	int sc = ui_lowres ? 1 : ((px >= 28) ? 2 : 1);
 	if (max_w > 0 && align != THEME_ALIGN_LEFT)
 	{
 		int tw = text_width(s, sc);
@@ -679,7 +690,7 @@ static int ui_text(int x, int y, const char *s, uint32_t color, int px, int max_
 
 static int classic_text_scale()
 {
-	return ui_lowres ? 2 : ui_scale;
+	return ui_lowres ? 1 : ui_scale;
 }
 
 // render the static layer: theme elements, or the classic vertical gradient
@@ -1259,9 +1270,9 @@ static void render_header()
 		// anything below its top edge.
 		if (ui_level == LV_SYSTEMS)
 		{
-			// Keep the 240p title at the same readable 2x CJK size as rows.
+			// Keep the 240p title at the same readable 16px size as rows.
 			// Scaling it again would collide with the first list row.
-			int tpx = ui_lowres ? 32 : px + px / 3;
+			int tpx = ui_lowres ? 16 : px + px / 3;
 			int ty = scr_h * 74 / 1000 - tpx / 2;
 			if (ui_lowres) ty = safe_t + 2;
 			else if (ty < 4) ty = 4;
@@ -1328,8 +1339,8 @@ static void render_footer()
 		}
 		if (ui_lowres)
 		{
-			// Short labels leave enough width for a full 2x (32px) CJK footer.
-			hpx = 32;
+			// Use the same 16px cell as the list so the footer stays clear.
+			hpx = 16;
 			hx = safe_l;
 			hy = scr_h - safe_b - hpx - 2;
 		}
@@ -1408,7 +1419,7 @@ static void render_row(int row)
 	entry_t *e = &items[idx];
 	uint32_t fg = (idx == sel) ? st.sel_text : (e->is_dir ? st.accent : st.text);
 
-	int px = st.use_theme ? st.font_px : (ui_lowres ? 32 : 16 * ui_scale);
+	int px = st.use_theme ? st.font_px : 16 * ui_scale;
 	int pad = st.use_theme ? (row_h / 4 + 2) : (ui_lowres ? 4 : 8 * ui_scale);
 	int tx = list_x + pad;
 	int ty = y + (row_h - px) / 2;
@@ -1443,7 +1454,7 @@ static void render_list()
 	render_scrollbar();
 	if (!item_cnt)
 	{
-		int px = st.use_theme ? st.font_px : (ui_lowres ? 32 : 16 * ui_scale);
+		int px = st.use_theme ? st.font_px : 16 * ui_scale;
 		ui_text(list_x + 8 * ui_scale, list_y + row_h, "（空目录）", st.dim, px, list_w, THEME_ALIGN_LEFT);
 	}
 }
@@ -1738,10 +1749,10 @@ static void render_showcase_labels(entry_t *e, int have_logo, int lx, int ly, in
 	int ny = ly + lh + (ui_lowres ? -6 : scr_h * 2 / 100);
 	if (!have_logo)
 	{
-		int px = ui_lowres ? 32 : st.font_px * 2;
+		int px = ui_lowres ? 16 : st.font_px * 2;
 		ui_text(lx, ly + lh / 2 - px / 2, label, 0xFFFFFF, px, lw, THEME_ALIGN_CENTER);
 	}
-	int npx = ui_lowres ? 32 : st.font_px + st.font_px / 4;
+	int npx = ui_lowres ? 16 : st.font_px + st.font_px / 4;
 	ui_text(lx, ny, label, 0xF0F0F0, npx, lw, THEME_ALIGN_CENTER);
 	ny += npx + (ui_lowres ? 2 : st.font_px / 2);
 	char cnt[48];
@@ -1763,7 +1774,7 @@ static void render_showcase_scrub(void)
 	entry_t *e = &items[sel];
 	int lx, ly, lw, lh;
 	showcase_geom(&lx, &ly, &lw, &lh);
-	int npx = ui_lowres ? 32 : st.font_px + st.font_px / 4;
+	int npx = ui_lowres ? 16 : st.font_px + st.font_px / 4;
 	int ty = ly + lh + (ui_lowres ? 2 : scr_h * 2 / 100);
 	int cpx = ui_lowres ? 16 : st.font_px;
 	int gap = ui_lowres ? 2 : st.font_px / 2;

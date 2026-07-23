@@ -18,6 +18,7 @@
 #include "fbui.h"
 #include "fbui_theme.h"
 #include "font_cjk.h"
+#include "charrom.h"
 #include "lib/imlib2/Imlib2.h"
 
 #pragma GCC diagnostic push
@@ -657,6 +658,21 @@ static int main_font_idx(void)
 static int draw_fallback_glyph(uint32_t *fb, int fbw, int fbh, int x, int y,
                                uint32_t cp, uint32_t rgb, int px)
 {
+	if (bitmap_font && cp < 0x80)
+	{
+		const unsigned char *g = charfont[cp & 0x7F];
+		for (int col = 0; col < 8; col++)
+			for (int row = 0; row < 8; row++)
+				if (g[col] & (1 << row))
+					for (int oy = 0; oy < 2; oy++)
+						for (int ox = 0; ox < 2; ox++)
+						{
+							int fx = x + col * 2 + ox, fy = y + row * 2 + oy;
+							if ((unsigned)fx < (unsigned)fbw && (unsigned)fy < (unsigned)fbh)
+								px_blend(fb + fy * fbw + fx, rgb, 255);
+						}
+		return 16;
+	}
 	const uint8_t *rec = fbui_hexfont_get(cp);
 	int cell_w = rec ? (rec[0] ? 16 : 8) : (cp < 0x80 ? 8 : 16);
 	int out_w = cell_w * px / 16;
@@ -684,6 +700,7 @@ static int draw_fallback_glyph(uint32_t *fb, int fbw, int fbh, int x, int y,
 
 static int glyph_advance(int font, int px, uint32_t cp)
 {
+	if (bitmap_font && cp < 0x80) return 16;
 	glyph_t *g = glyph_get(font, px, cp);
 	if (g) return g->adv;
 	const uint8_t *rec = fbui_hexfont_get(cp);
@@ -1197,7 +1214,10 @@ void theme_render_static(uint32_t *fb, int fbw, int fbh)
 		}
 		else if (e->type == EL_TEXT && e->text[0])
 		{
-			int px = (int)(e->font_size * scrH);
+			// At 240p every static theme label uses the same 16px cell as the
+			// dynamic browser text.  Theme-authored fractional HD sizes are not
+			// readable or consistent on a 240-line CRT.
+			int px = bitmap_font ? 16 : (int)(e->font_size * scrH);
 			if (px < 8) px = 8;
 			theme_draw_text(fb, fbw, fbh, x, y, e->text, e->color, px, w, e->align);
 		}

@@ -3667,6 +3667,14 @@ int video_fb_readback(uint16_t *out_fmt, uint16_t *out_w, uint16_t *out_h, int *
 	return 1;
 }
 
+uint32_t* video_fb_get_plane(int n, int *w, int *h)
+{
+	if (w) *w = fb_width;
+	if (h) *h = fb_height;
+	if (!fb_base || n < 1 || n > 2) return NULL;
+	return (uint32_t*)(fb_base + (FB_SIZE * n));
+}
+
 int video_fb_fill_solid(uint32_t rgb888, int plane)
 {
 	if (!fb_base || fb_width <= 0 || fb_height <= 0)
@@ -4470,6 +4478,75 @@ void video_mode_cmd(char *cmd)
 	video_set_mode(&v, v.Fpix);
 	user_io_send_buttons(1);
 	printf("video_mode_cmd: applied mode \"%s\"\n", cmd);
+}
+
+// Saved when FBUI boot-res picker first applies a unified mode.
+static int menu_res_active = 0;
+static int menu_res_saved_vga_scaler = 0;
+static vmode_custom_t menu_res_saved_v = {};
+
+void video_menu_res_apply(int is_1080)
+{
+	PROFILE_FUNCTION();
+
+	if (!menu_res_active)
+	{
+		menu_res_saved_vga_scaler = cfg.vga_scaler;
+		menu_res_saved_v = v_cur;
+		menu_res_active = 1;
+		printf("video_menu_res: saved scaler=%d mode %dx%d\n",
+			menu_res_saved_vga_scaler,
+			menu_res_saved_v.item[1], menu_res_saved_v.item[5]);
+	}
+
+	// Unify both outputs for the menu session.
+	cfg.vga_scaler = 1;
+
+	if (is_1080)
+	{
+		v_def = menu_res_saved_v;
+		v_cur = menu_res_saved_v;
+		video_set_mode(&v_cur, v_cur.Fpix);
+		printf("video_menu_res: apply 1080-class %dx%d\n", v_cur.item[1], v_cur.item[5]);
+	}
+	else
+	{
+		// NTSC 15kHz 240p (tvmodes[0])
+		char mode[] = "640,30,60,70,240,4,4,14,12587";
+		vmode_custom_t v = {};
+		if (parse_custom_video_mode(mode, &v) != -2)
+		{
+			printf("video_menu_res: failed to parse 240p mode\n");
+			cfg.vga_scaler = menu_res_saved_vga_scaler;
+			menu_res_active = 0;
+			return;
+		}
+		v_def = v;
+		v_cur = v;
+		video_set_mode(&v, v.Fpix);
+		printf("video_menu_res: apply 240p 15kHz\n");
+	}
+
+	user_io_send_buttons(1);
+}
+
+void video_menu_res_restore()
+{
+	if (!menu_res_active) return;
+
+	cfg.vga_scaler = menu_res_saved_vga_scaler;
+	v_def = menu_res_saved_v;
+	v_cur = menu_res_saved_v;
+	video_set_mode(&v_cur, v_cur.Fpix);
+	user_io_send_buttons(1);
+	menu_res_active = 0;
+	printf("video_menu_res: restored scaler=%d %dx%d\n",
+		cfg.vga_scaler, v_cur.item[1], v_cur.item[5]);
+}
+
+int video_menu_res_active()
+{
+	return menu_res_active;
 }
 
 static constexpr int CELL_GRAN_RND = 4;

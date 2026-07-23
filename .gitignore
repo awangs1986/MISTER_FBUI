@@ -31,3 +31,20 @@ MiSTer
 /bin
 font/*.ttf
 font/*.otf
+
+# MISTER_FBUI local build/test artifacts
+/build_*.log
+/out/
+
+# Local conversation archives may contain machine-specific/private context.
+/docs/chat-backup/
+
+# Optional third-party metadata and generated tooling outputs.
+/tools/data/
+/tools/GamelistEditor/bin/
+/tools/GamelistEditor/obj/
+/tools/GamelistEditor/publish/
+/tools/GamelistEditor/*.exe
+/tools/mister_rom_hashes.json
+/tools/rename_plan.json
+/tools/rename_plan.txt

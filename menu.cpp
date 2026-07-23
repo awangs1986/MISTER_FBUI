@@ -59,7 +59,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "cheats.h"
 #include "game_docs.h"
 #include "video.h"
-#include "fb_probe.h"
+#include "fbui.h"
 #include "audio.h"
 #include "joymapping.h"
 #include "recent.h"
@@ -1231,6 +1231,20 @@ void HandleUI(void)
 		c = menu_key_get();
 	}
 
+	// FBUI: full-screen graphical browser takes over all input in menu core
+	if (is_menu())
+	{
+		int fbui_res = fbui_ui_hook(&c);
+		if (fbui_res == 2)
+		{
+			// just exited -> redraw classic OSD main menu
+			menustate = MENU_NONE1;
+			menusub = 0;
+			return;
+		}
+		if (fbui_res) return;
+	}
+
 	// decode and set events
 	menu = false;
 	back = false;
@@ -1531,7 +1545,6 @@ void HandleUI(void)
 	// Ensure we clear out the file-selector-visible file on select or cancel
 	if (menustate == fs_MenuSelect || menustate == fs_MenuCancel)
 	{
-		fb_probe_red_end();
 		flist_set_rows_per_item(1);
 		flist_set_page_override(0);
 	}
@@ -5358,17 +5371,6 @@ void HandleUI(void)
 	case MENU_FILE_SELECT1:
 		helptext_idx = (fs_Options & SCANO_UMOUNT) ? HELPTEXT_EJECT : (fs_Options & SCANO_CLEAR) ? HELPTEXT_CLEAR : 0;
 		OsdSetTitle((fs_Options & SCANO_CORES) ? "Cores" : "Select", 0);
-		// Smoke test: in-core ROM picker — F9-style HPS FB (OSD off, fullscreen color).
-		if (!(fs_Options & SCANO_CORES) && !is_menu())
-		{
-			if (fb_probe_red_begin())
-			{
-				menustate = MENU_FILE_SELECT2;
-				break;
-			}
-		}
-		else
-			fb_probe_red_end();
 		PrintDirectory(hold_cnt<2);
 		menustate = MENU_FILE_SELECT2;
 		if (cfg.log_file_entry && flist_nDirEntries())
@@ -5382,33 +5384,6 @@ void HandleUI(void)
 
 	case MENU_FILE_SELECT2:
 		menumask = 0;
-
-		// While probe is on: no OSD list — cycle colors until Menu/Select.
-		if (fb_probe_active())
-		{
-			fb_probe_red_refresh();
-			if (menu || select || back)
-			{
-				fb_probe_red_end();
-				if (menu || back)
-				{
-					menustate = fs_MenuCancel;
-					helptext_idx = 0;
-				}
-				else
-				{
-					// Select: dismiss probe and show normal file list.
-					PrintDirectory(1);
-					if (cfg.log_file_entry && flist_nDirEntries())
-					{
-						MakeFile("/tmp/CURRENTPATH", flist_SelectedItem()->altname);
-						MakeFile("/tmp/FULLPATH", selPath);
-						MakeFile("/tmp/FILESELECT", "active");
-					}
-				}
-			}
-			break;
-		}
 
 		if (c == KEY_BACKSPACE && (fs_Options & (SCANO_UMOUNT | SCANO_CLEAR)) && !strlen(filter))
 		{
@@ -5451,14 +5426,12 @@ void HandleUI(void)
 			}
 
 			if (!strcasecmp(fs_pFileExt, "RBF")) selPath[0] = 0;
-			fb_probe_red_end();
 			menustate = fs_MenuCancel;
 			helptext_idx = 0;
 		}
 
 		if (recent && recent_init((fs_Options & SCANO_CORES) ? -1 : (fs_Options & SCANO_UMOUNT) ? ioctl_index + 500 : ioctl_index))
 		{
-			fb_probe_red_end();
 			menustate = MENU_RECENT1;
 		}
 

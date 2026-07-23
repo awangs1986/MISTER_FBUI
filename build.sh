@@ -1,29 +1,17 @@
-#!/bin/bash
-
-# create simple text file named 'host' in this folder with IP address of your MiSTer.
-
-HOST=192.168.1.75
-BUILDDIR=bin
-[ -f host ] && HOST=$(cat host)
-
-# make script fail if any command failed,
-# so we don't need to check the exit status of every command.
-set -e
+#!/usr/bin/env bash
 set -o pipefail
 
-echo "Start building..."
-make
+# Cross-compile MiSTer with Arm GNU Toolchain 10.2-2020.11.
+# Override ARM_TOOLCHAIN_DIR when the toolchain is installed elsewhere.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+TOOLCHAIN_DIR="${ARM_TOOLCHAIN_DIR:-$HOME/gcc-arm-10.2-2020.11-x86_64-arm-none-linux-gnueabihf}"
+export PATH="$TOOLCHAIN_DIR/bin:$PATH"
 
-set +e
-echo y|plink root@$HOST -pw 1 'killall MiSTer'
+cd "$SCRIPT_DIR" || exit 1
+command -v arm-none-linux-gnueabihf-gcc >/dev/null || {
+	echo "ARM toolchain not found: $TOOLCHAIN_DIR" >&2
+	exit 1
+}
 
-set -e
-ftp -n <<EOF
-open $HOST
-user root 1
-passive
-binary
-put $BUILDDIR/MiSTer /media/fat/MiSTer
-EOF
-
-plink root@$HOST -pw 1 -batch 'sync;PATH=/media/fat:$PATH;MiSTer >/dev/ttyS0 2>/dev/ttyS0 </dev/null &'
+make "$@" 2>&1 | tee /tmp/mister_fbui_build.log
+exit "${PIPESTATUS[0]}"

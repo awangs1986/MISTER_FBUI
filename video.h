@@ -71,11 +71,21 @@ void video_fb_set_rxb(int enable);
 int video_fb_readback(uint16_t *fb_fmt, uint16_t *fb_w, uint16_t *fb_h, int *fb_en);
 // Enable HPS FB plane and fill solid XRGB color. Returns 1 on success.
 int video_fb_fill_solid(uint32_t rgb888, int plane = 0);
+// Raw pixel access to wallpaper planes (1 or 2) for FBUI. Returns NULL if FB
+// is not mapped yet. w/h are the current framebuffer dimensions.
+uint32_t* video_fb_get_plane(int n, int *w, int *h);
 void video_menu_bg(int n, int idle = 0);
 int video_bg_has_picture();
 int video_chvt(int num);
 void video_cmd(char *cmd);
 void video_mode_cmd(char *cmd);
+
+// FBUI boot resolution: temporarily unify HDMI+VGA to one mode.
+// is_1080=0 -> NTSC 15kHz 240p; is_1080=1 -> restore pre-picker HD mode.
+// First call saves INI vga_scaler + current timings; restore brings them back.
+void video_menu_res_apply(int is_1080);
+void video_menu_res_restore();
+int video_menu_res_active();
 
 void video_core_description(char *str, size_t len);
 void video_scaler_description(char *str, size_t len);

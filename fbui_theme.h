@@ -40,6 +40,9 @@ int  theme_load(const char *xml_path, const char *view,
 void theme_unload(void);
 int  theme_active(void);
 
+// 240p uses GNU Unifont bitmap glyphs only; HD uses the theme TrueType font.
+void theme_set_bitmap_font(int enable);
+
 // Draw all static elements (z-sorted images and fixed text; metadata
 // placeholders named md_* are skipped) into an 0RGB32 buffer.
 void theme_render_static(uint32_t *fb, int fbw, int fbh);
@@ -58,8 +61,7 @@ int  theme_get_image_rect(const char *name, int *x, int *y, int *w, int *h);
 // helpsystem position/color. Returns 1 if the view defines one.
 int  theme_get_help(int *x, int *y, uint32_t *color, int *font_px);
 
-// 1 when a usable TTF font came with the theme (theme_draw_text will not
-// just fall back to the bitmap font).
+// 1 when the selected profile has a usable text backend.
 int  theme_has_font(void);
 
 // Draw UTF-8 text with the theme TTF (unifont/builtin fallback for glyphs

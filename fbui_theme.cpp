@@ -85,6 +85,7 @@ static int scrW = 0, scrH = 0;
 static int th_loaded = 0;
 static char main_font[512]; // font of the textlist (or first text el)
 static char hidden_csv[128] = "";
+static int bitmap_font = 0;
 
 static void trim(char *s);
 
@@ -692,7 +693,7 @@ static int glyph_advance(int font, int px, uint32_t cp)
 
 int theme_text_width(const char *utf8, int font_px)
 {
-	int font = main_font_idx();
+	int font = bitmap_font ? -1 : main_font_idx();
 	int w = 0;
 	const char *p = utf8;
 	while (*p)
@@ -708,7 +709,7 @@ int theme_draw_text(uint32_t *fb, int fbw, int fbh, int x, int y,
                     const char *utf8, uint32_t color, int font_px,
                     int max_w, int align)
 {
-	int font = main_font_idx();
+	int font = bitmap_font ? -1 : main_font_idx();
 	uint32_t rgb = color & 0xFFFFFF;
 
 	if (max_w > 0 && align != THEME_ALIGN_LEFT)
@@ -755,7 +756,7 @@ int theme_draw_text(uint32_t *fb, int fbw, int fbh, int x, int y,
 
 int theme_has_font(void)
 {
-	return main_font_idx() >= 0;
+	return bitmap_font || main_font_idx() >= 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1149,11 +1150,18 @@ void theme_unload(void)
 	subset_cnt = 0;
 	th_loaded = 0;
 	main_font[0] = 0;
+	bitmap_font = 0;
 }
 
 int theme_active(void)
 {
 	return th_loaded;
+}
+
+void theme_set_bitmap_font(int enable)
+{
+	bitmap_font = !!enable;
+	printf("FBUI theme font: %s\n", bitmap_font ? "240p bitmap" : "HD TrueType");
 }
 
 void theme_render_static(uint32_t *fb, int fbw, int fbh)

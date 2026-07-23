@@ -569,6 +569,10 @@ static void theme_apply()
 		return;
 	}
 
+	// Two explicit font profiles: 240p is integer-scaled bitmap only; HD keeps
+	// the theme's anti-aliased TrueType face.
+	theme_set_bitmap_font(ui_lowres);
+
 	if (st.showcase)
 	{
 		// carousel-driven labels/logo/bg: we paint those per selection;
@@ -654,14 +658,14 @@ static void layout_apply()
 // text dispatch: theme TTF engine when a theme is active, bitmap engine else
 static int ui_text(int x, int y, const char *s, uint32_t color, int px, int max_w, int align)
 {
-	if (st.use_theme)
+	if (st.use_theme && !ui_lowres)
 	{
 		int w = theme_draw_text(shadow, scr_w, scr_h, x, y, s, color, px, max_w, align);
 		dirty_add(x, y, x + ((max_w > 0) ? max_w : w), y + px + px / 4 + 1);
 		return w;
 	}
 
-	int sc = (px >= 28) ? 2 : 1;
+	int sc = ui_lowres ? 2 : ((px >= 28) ? 2 : 1);
 	if (max_w > 0 && align != THEME_ALIGN_LEFT)
 	{
 		int tw = text_width(s, sc);

@@ -77,6 +77,11 @@ int  theme_text_width(const char *utf8, int font_px);
 // centered. Returns 1 when something was drawn.
 int  theme_blit_image_file(uint32_t *fb, int fbw, int fbh, const char *path,
                            int bx, int by, int bw, int bh);
+// Fit a raster image using the display pixel aspect ratio (physical pixel
+// width / height), then center it with bars. 1/2 matches 640x240 on a 4:3 CRT.
+int  theme_blit_image_fit_par(uint32_t *fb, int fbw, int fbh, const char *path,
+                              int bx, int by, int bw, int bh,
+                              int par_num, int par_den);
 // Same, but fill the box (crop overflow) — for full-bleed backgrounds.
 int  theme_blit_image_cover(uint32_t *fb, int fbw, int fbh, const char *path,
                             int bx, int by, int bw, int bh);

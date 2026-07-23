@@ -1219,7 +1219,11 @@ static int render_game_backdrop_layer(void)
 		uint32_t *p = bglayer + (size_t)(y + row) * scr_w + x;
 		for (int col = 0; col < w; col++) p[col] = 0x000000;
 	}
-	return theme_blit_image_file(bglayer, scr_w, scr_h, image, x, y, w, h);
+	// 640x240 is presented as 4:3 on a CRT: framebuffer pixels are about half
+	// as wide as they are tall. Correct that pixel aspect so a square-pixel 4:3
+	// screenshot appears near full-screen instead of as a narrow center strip.
+	return theme_blit_image_fit_par(bglayer, scr_w, scr_h, image, x, y, w, h,
+		1, ui_lowres ? 2 : 1);
 }
 
 // ---------------------------------------------------------------------------

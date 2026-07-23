@@ -997,6 +997,37 @@ int theme_blit_image_file(uint32_t *fb, int fbw, int fbh, const char *path,
 	return blit_img(fb, fbw, fbh, path, bx, by, bw, bh, BLIT_FIT, 0xFFFFFFFF);
 }
 
+int theme_blit_image_fit_par(uint32_t *fb, int fbw, int fbh, const char *path,
+                             int bx, int by, int bw, int bh,
+                             int par_num, int par_den)
+{
+	if (par_num <= 0 || par_den <= 0)
+		return theme_blit_image_file(fb, fbw, fbh, path, bx, by, bw, bh);
+
+	// Screenshots are raster assets. Read their square-pixel dimensions, then
+	// choose a raw framebuffer rectangle whose *physical* aspect is identical.
+	Imlib_Image img = imlib_load_image(path);
+	if (!img) return 0;
+	imlib_context_set_image(img);
+	int sw = imlib_image_get_width();
+	int sh = imlib_image_get_height();
+	imlib_free_image();
+	if (sw <= 0 || sh <= 0) return 0;
+
+	int dw = bw;
+	int dh = (int)((int64_t)bw * sh * par_num / ((int64_t)sw * par_den));
+	if (dh > bh)
+	{
+		dh = bh;
+		dw = (int)((int64_t)bh * sw * par_den / ((int64_t)sh * par_num));
+	}
+	if (dw < 1) dw = 1;
+	if (dh < 1) dh = 1;
+	return blit_img(fb, fbw, fbh, path,
+		bx + (bw - dw) / 2, by + (bh - dh) / 2, dw, dh,
+		BLIT_STRETCH, 0xFFFFFFFF);
+}
+
 int theme_blit_image_cover(uint32_t *fb, int fbw, int fbh, const char *path,
                            int bx, int by, int bw, int bh)
 {

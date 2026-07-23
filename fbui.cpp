@@ -1197,8 +1197,9 @@ static void find_media(const char *game, char *image_out, size_t isz,
 	// multi-thousand-entry) XML on every selection.
 }
 
-// Draw the selected game's screenshot behind the browser. The image fills
-// the main safe viewport while preserving aspect ratio; overflow is cropped.
+// Draw the selected game's screenshot behind the browser. Scale uniformly to
+// fit the main safe viewport: never stretch or crop, and leave black bars when
+// the source and display aspect ratios differ.
 static int render_game_backdrop_layer(void)
 {
 	if (ui_level != LV_GAMES || !item_cnt || sel < 0 || sel >= item_cnt || items[sel].is_dir)
@@ -1213,7 +1214,12 @@ static int render_game_backdrop_layer(void)
 	int w = scr_w - safe_l - safe_r;
 	int h = scr_h - safe_t - safe_b - footer_h - 4;
 	if (w <= 0 || h <= 0) return 0;
-	return theme_blit_image_cover(bglayer, scr_w, scr_h, image, x, y, w, h);
+	for (int row = 0; row < h; row++)
+	{
+		uint32_t *p = bglayer + (size_t)(y + row) * scr_w + x;
+		for (int col = 0; col < w; col++) p[col] = 0x000000;
+	}
+	return theme_blit_image_file(bglayer, scr_w, scr_h, image, x, y, w, h);
 }
 
 // ---------------------------------------------------------------------------

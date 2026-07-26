@@ -72,6 +72,7 @@ static const ini_var_t ini_vars[] =
 	{ "FB_TERMINAL", (void*)(&(cfg.fb_terminal)), UINT8, 0, 1 },
 	{ "FBUI", (void*)(&(cfg.fbui)), UINT8, 0, 1 },
 	{ "FBUI_THEME", (void*)(cfg.fbui_theme), STRING, 0, sizeof(cfg.fbui_theme) - 1 },
+	{ "FBUI_SKIN", (void*)(cfg.fbui_skin), STRING, 0, sizeof(cfg.fbui_skin) - 1 },
 	{ "OSD_TIMEOUT", (void*)(&(cfg.osd_timeout)), INT16, 0, 3600 },
 	{ "DIRECT_VIDEO", (void*)(&(cfg.direct_video)), UINT8, 0, 2 },
 	{ "OSD_ROTATE", (void*)(&(cfg.osd_rotate)), UINT8, 0, 2 },

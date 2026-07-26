@@ -25,7 +25,8 @@
 #include "hardware.h"
 
 #include "fbui.h"
-#include "fbui_theme.h"
+#include "fbui_text.h"
+#include "fbui_skin.h"
 #include "file_io.h"
 #include "video.h"
 #include "osd.h"
@@ -35,8 +36,7 @@
 #include "charrom.h"
 #include "font_cjk.h"
 #include "support/arcade/mra_loader.h"
-#include "lib/imlib2/Imlib2.h"
-#include "sxmlc.h"
+#include "sxmlc.h"   // gamelist.xml only; the skin path no longer parses XML
 
 // ---------------------------------------------------------------------------
 // System -> core mapping (delay/type/index follow common MGL conventions;
@@ -284,23 +284,93 @@ static void bg_restore(int x, int y, int w, int h)
 	dirty_add(x, y, x + w, y + h);
 }
 
-static void put_px(int x, int y, uint32_t color, int s)
+// ---------------------------------------------------------------------------
+// Bitmap text engine
+// ---------------------------------------------------------------------------
+// Glyph rows are turned into horizontal runs and written straight into the
+// shadow buffer. Clipping is resolved per run and the dirty rectangle is
+// extended once per string, rather than once per lit pixel: a screen of CJK
+// text used to cost roughly eleven thousand fill_rect/dirty_add pairs.
+
+// Horizontal multiplier for full-width (CJK) cells. At 640x240 a framebuffer
+// pixel is half as wide as it is tall, so a 16x16 glyph reaches the eye
+// squashed to half width and the strokes merge into a blob. Doubling the width
+// makes CJK square again; Latin keeps single width, which is exactly the
+// half-width / full-width convention.
+static inline int cjk_xscale(void)
 {
-	fill_rect(x, y, s, s, color);
+	return ui_lowres ? 2 : 1;
+}
+
+// One horizontal run. Caller guarantees y is inside the buffer.
+static inline void text_span(int x, int y, int n, uint32_t color)
+{
+	if (x < 0) { n += x; x = 0; }
+	if (x + n > scr_w) n = scr_w - x;
+	if (n <= 0) return;
+	uint32_t *p = shadow + (size_t)y * scr_w + x;
+	while (n--) *p++ = color;
+}
+
+// Unclipped-in-y rect used for glyph decorations; no dirty bookkeeping.
+static void text_rect(int x, int y, int w, int h, uint32_t color)
+{
+	for (int j = 0; j < h; j++)
+	{
+		int fy = y + j;
+		if ((unsigned)fy < (unsigned)scr_h) text_span(x, fy, w, color);
+	}
+}
+
+// Emit one glyph row. `bits` holds `nbits` pixels MSB-first; each source pixel
+// becomes sx wide and sy tall. Adjacent set bits collapse into a single run.
+static void glyph_row(int x, int y, uint32_t bits, int nbits, int sx, int sy, uint32_t color)
+{
+	if (!bits) return;
+	for (int col = 0; col < nbits; )
+	{
+		if (!(bits & (1u << (nbits - 1 - col)))) { col++; continue; }
+		int run = 1;
+		while (col + run < nbits && (bits & (1u << (nbits - 1 - col - run)))) run++;
+		for (int j = 0; j < sy; j++)
+		{
+			int fy = y + j;
+			if ((unsigned)fy < (unsigned)scr_h) text_span(x + col * sx, fy, run * sx, color);
+		}
+		col += run;
+	}
+}
+
+// pack a column-major 8x8 charfont row into an MSB-first bit mask
+static inline uint32_t charfont_row(const unsigned char *g, int row)
+{
+	uint32_t bits = 0;
+	for (int col = 0; col < 8; col++)
+		if (g[col] & (1 << row)) bits |= 0x80u >> col;
+	return bits;
+}
+
+// Advance width of one glyph. Must agree with draw_glyph exactly.
+static int glyph_adv(uint32_t cp, int s)
+{
+	if (ui_lowres && cp < 0x80) return 16;
+	const uint8_t *rec = fbui_hexfont_get(cp);
+	int wide = rec ? rec[0] : (cp >= 0x80);
+	return wide ? (16 * cjk_xscale() * s) : (8 * s);
 }
 
 // scale s: glyph cell is 16*s px tall. Returns x advance.
 static int draw_glyph(int x, int y, uint32_t cp, uint32_t color, int s)
 {
+	int xs = cjk_xscale();
+
 	// Dedicated 240p Latin face: MiSTer's built-in 8x8 font at exact 2x.
 	// It shares a 16x16 cell with native-size Unifont CJK glyphs.
 	if (ui_lowres && cp < 0x80)
 	{
 		const unsigned char *g = charfont[cp & 0x7F];
-		for (int col = 0; col < 8; col++)
-			for (int row = 0; row < 8; row++)
-				if (g[col] & (1 << row))
-					fill_rect(x + col * 2, y + row * 2, 2, 2, color);
+		for (int row = 0; row < 8; row++)
+			glyph_row(x, y + row * 2, charfont_row(g, row), 8, 2, 2, color);
 		return 16;
 	}
 
@@ -309,56 +379,48 @@ static int draw_glyph(int x, int y, uint32_t cp, uint32_t color, int s)
 	{
 		int wide = rec[0];
 		const uint8_t *bm = rec + 1;
+		int nbits = wide ? 16 : 8;
+		int sx = (wide ? xs : 1) * s;
 		for (int row = 0; row < 16; row++)
 		{
-			if (wide)
-			{
-				uint16_t bits = ((uint16_t)bm[row * 2] << 8) | bm[row * 2 + 1];
-				for (int col = 0; col < 16; col++)
-					if (bits & (0x8000 >> col)) put_px(x + col * s, y + row * s, color, s);
-			}
-			else
-			{
-				uint8_t bits = bm[row];
-				for (int col = 0; col < 8; col++)
-					if (bits & (0x80 >> col)) put_px(x + col * s, y + row * s, color, s);
-			}
+			uint32_t bits = wide ? (((uint32_t)bm[row * 2] << 8) | bm[row * 2 + 1]) : bm[row];
+			glyph_row(x, y + row * s, bits, nbits, sx, s, color);
 		}
-		return (wide ? 16 : 8) * s;
+		return nbits * sx;
 	}
 
 	// built-in 12x12 CJK sample (column-major, bit0 = top), centered in 16px
 	const uint16_t *cols = (cp >= 0x80) ? font_cjk_get(cp) : NULL;
 	if (cols)
 	{
-		for (int col = 0; col < FONT_CJK_WIDTH; col++)
+		int sx = xs * s;
+		for (int row = 0; row < FONT_CJK_HEIGHT; row++)
 		{
-			uint16_t bits = cols[col];
-			for (int row = 0; row < FONT_CJK_HEIGHT; row++)
-				if (bits & (1 << row)) put_px(x + (col + 2) * s, y + (row + 2) * s, color, s);
+			uint32_t bits = 0;
+			for (int col = 0; col < FONT_CJK_WIDTH; col++)
+				if (cols[col] & (1 << row)) bits |= 1u << (FONT_CJK_WIDTH - 1 - col);
+			glyph_row(x + 2 * sx, y + (row + 2) * s, bits, FONT_CJK_WIDTH, sx, s, color);
 		}
-		return 16 * s;
+		return 16 * sx;
 	}
 
 	if (cp < 0x80)
 	{
 		// built-in OSD 8x8 font (column-major, bit0 = top), doubled to 8x16 cell
 		const unsigned char *g = charfont[cp & 0x7F];
-		for (int col = 0; col < 8; col++)
-		{
-			for (int row = 0; row < 8; row++)
-				if (g[col] & (1 << row)) fill_rect(x + col * s, y + (row * 2 + 1) * s, s, 2 * s, color);
-		}
+		for (int row = 0; row < 8; row++)
+			glyph_row(x, y + (row * 2 + 1) * s, charfont_row(g, row), 8, s, 2 * s, color);
 		return 8 * s;
 	}
 
 	// missing glyph: hollow box
-	int w = 14 * s;
-	fill_rect(x + s, y + 2 * s, w, s, color);
-	fill_rect(x + s, y + 13 * s, w, s, color);
-	fill_rect(x + s, y + 2 * s, s, 12 * s, color);
-	fill_rect(x + w, y + 2 * s, s, 12 * s, color);
-	return 16 * s;
+	int sx = xs * s;
+	int w = 14 * sx;
+	text_rect(x + sx, y + 2 * s, w, s, color);
+	text_rect(x + sx, y + 13 * s, w, s, color);
+	text_rect(x + sx, y + 2 * s, sx, 12 * s, color);
+	text_rect(x + w, y + 2 * s, sx, 12 * s, color);
+	return 16 * sx;
 }
 
 // Draw UTF-8 string, clipped to max_w px. Returns drawn width.
@@ -370,17 +432,22 @@ static int draw_text(int x, int y, const char *str, uint32_t color, int s, int m
 	{
 		uint32_t cp;
 		p += utf8_decode(p, &cp);
-		int adv = ui_lowres ? 16 : (cp < 0x80 ? 8 : 16) * s;
+		int adv = glyph_adv(cp, s);
 		if (max_w && cx + adv > max_w)
 		{
 			// ellipsis
 			if (max_w >= cx + 6 * s)
-				for (int i = 0; i < 3; i++) fill_rect(x + cx + i * 2 * s + s,
-					y + (ui_lowres ? 14 : 14 * s), s, s, color);
+				for (int i = 0; i < 3; i++)
+					text_rect(x + cx + i * 2 * s + s, y + (ui_lowres ? 14 : 14 * s), s, s, color);
 			break;
 		}
-		cx += draw_glyph(x + cx, y, cp, color, s);
+		draw_glyph(x + cx, y, cp, color, s);
+		cx += adv;
 	}
+
+	// The HD 8x8 fallback face reaches 17*s below the origin; be generous
+	// rather than leave a row of stale pixels un-flushed.
+	if (cx > 0) dirty_add(x, y, x + cx, y + (ui_lowres ? 16 : 18 * s));
 	return cx;
 }
 
@@ -392,7 +459,7 @@ static int text_width(const char *str, int s)
 	{
 		uint32_t cp;
 		p += utf8_decode(p, &cp);
-		w += ui_lowres ? 16 : (cp < 0x80 ? 8 : 16) * s;
+		w += glyph_adv(cp, s);
 	}
 	return w;
 }
@@ -433,9 +500,15 @@ static uint32_t msg_timer = 0;
 
 static void preview_stop(void);
 static void sc_prefetch_reset(void);
+static void th_cache_reset(void);
+static void th_cache_clear_all(void);
+static void th_cache_free(void);
+static int  th_prefetch_step(void);
+static int  thumb_draw(const char *path, int bx, int by, int bw, int bh);
 static pid_t prev_pid = -1;
 
-// layout (computed from scr_w/h)
+// Layout mirrors of the active skin. The skin engine owns every number; these
+// are just locals so the render code below stays readable.
 static int ui_scale;
 static int header_h, footer_h, row_h, list_x, list_y, list_w, list_rows;
 static int panel_x, panel_y, panel_w, panel_h;
@@ -443,72 +516,47 @@ static int game_backdrop_active;
 // CRTs commonly overscan. Keep the complete 240p composition inside this inset.
 static int safe_l, safe_t, safe_r, safe_b;
 
-// colors
-#define COL_BG_TOP    0x1A2029
-#define COL_BG_BOT    0x0D1015
-#define COL_HEADER    0x232B38
-#define COL_TEXT      0xC8D0DA
-#define COL_DIM       0x707A88
-#define COL_SEL_BG    0x2A6BD8
-#define COL_SEL_TEXT  0xFFFFFF
-#define COL_ACCENT    0x4A90E2
-#define COL_PANEL     0x161B24
-
-// active style: defaults above, or values pulled from the loaded ES theme
+// Active style, entirely skin-driven (the skin engine supplies built-in
+// defaults when no package is installed, so this is always populated).
 static struct
 {
-	int use_theme;
-	int showcase;     // system-view carousel style (one system, full-bleed art)
+	int showcase;     // system-view style: one system, full-bleed art
 	uint32_t text, dim, sel_bg, sel_text, accent;
 	int font_px;      // list row text height
-	int list_align;   // THEME_ALIGN_*
-	int have_panel;   // theme provides an md_image slot (or classic mode)
+	int list_align;   // SKIN_ALIGN_*
+	int have_panel;   // a media panel slot exists at this level
 } st;
 
 static void layout_compute()
 {
-	// Keep this decision local to the framebuffer. The video-mode state must not
-	// participate in drawing: a mode switch and FB remap do not become visible
-	// atomically, which can otherwise select geometry for the wrong buffer.
-	ui_lowres = (scr_h <= 288);
-	ui_scale = (scr_h >= 900) ? 2 : 1;
-	safe_l = safe_r = ui_lowres ? (scr_w * 6 / 100) : 0;
-	safe_t = safe_b = ui_lowres ? (scr_h * 6 / 100) : 0;
+	const skin_t *s = skin();
 
-	if (ui_lowres)
-	{
-		// Dedicated 240p geometry: unified 16x16 bitmap cells in 22px rows.
-		// At 640x240 this leaves seven visible list rows plus a large media panel.
-		header_h = 24;
-		footer_h = 24;
-		row_h = 22;
-		list_x = safe_l + 8;
-		list_y = safe_t + header_h + 4;
-		list_w = (scr_w - safe_l - safe_r) * 58 / 100 - 8;
-		list_rows = (scr_h - safe_b - footer_h - 4 - list_y) / row_h;
-		if (list_rows < 1) list_rows = 1;
-		panel_x = safe_l + (scr_w - safe_l - safe_r) * 60 / 100;
-		// Game media may use the otherwise empty upper-right band. Portrait
-		// covers are height-limited, so extending upward makes them materially
-		// larger without narrowing the text list or distorting aspect ratio.
-		panel_y = (ui_level == LV_GAMES) ? (safe_t + 8) : list_y;
-		panel_w = scr_w - safe_r - panel_x - 8;
-		panel_h = scr_h - safe_b - footer_h - 4 - panel_y;
-		return;
-	}
+	// The resolution profile is decided once, inside the skin engine. Nothing
+	// else in this file may re-derive it from scr_h: a mode switch and the FB
+	// remap do not become visible atomically, so geometry must come from a
+	// single snapshot taken when the skin was loaded.
+	ui_lowres = s->lowres;
+	ui_scale = s->scale;
+	safe_l = s->safe_l;
+	safe_t = s->safe_t;
+	safe_r = s->safe_r;
+	safe_b = s->safe_b;
 
-	header_h = 28 * ui_scale;
-	footer_h = 24 * ui_scale;
-	row_h = 20 * ui_scale;
-	list_x = safe_l + 12 * ui_scale;
-	list_y = safe_t + header_h + 8 * ui_scale;
-	list_w = (scr_w - safe_l - safe_r) * 58 / 100 - 12 * ui_scale;
-	list_rows = (scr_h - safe_b - list_y - footer_h - 8 * ui_scale) / row_h;
-	if (list_rows < 1) list_rows = 1;
-	panel_x = safe_l + (scr_w - safe_l - safe_r) * 60 / 100;
-	panel_y = list_y;
-	panel_w = scr_w - safe_r - panel_x - 12 * ui_scale;
-	panel_h = scr_h - safe_b - panel_y - footer_h - 8 * ui_scale;
+	header_h = s->header_h;
+	footer_h = s->footer_h;
+	row_h = s->row_h;
+	list_x = s->list_x;
+	list_y = s->list_y;
+	list_w = s->list_w;
+	list_rows = s->list_rows;
+
+	// One panel rect for both levels. The static layer is pre-baked, so a
+	// position that moved with the browser level would no longer line up with
+	// the artwork underneath it.
+	panel_x = s->panel_x;
+	panel_y = s->panel_y;
+	panel_w = s->panel_w;
+	panel_h = s->panel_h;
 }
 
 // ES system name for a games/ directory (sys_maps entry or lowercased name)
@@ -522,136 +570,33 @@ static const char *es_sys_name(const char *dir)
 	return low;
 }
 
-// ES system name for the currently highlighted systems-list row
-static const char *sel_es_name(void)
+// Apply the active skin to the style block. Colors, fonts, the showcase switch
+// and every coordinate come from the package, or from the skin engine's
+// built-in defaults when no package is installed.
+static void skin_apply()
 {
-	if (ui_level != LV_SYSTEMS || !item_cnt || sel < 0 || sel >= item_cnt) return "";
-	return es_sys_name(items[sel].name);
-}
+	const skin_t *s = skin();
 
-// (re)load the ES theme for the current browser level and fill `st`
-static void theme_apply()
-{
-	st.use_theme = 0;
-	st.showcase = 0;
-	st.text = COL_TEXT;
-	st.dim = COL_DIM;
-	st.sel_bg = COL_SEL_BG;
-	st.sel_text = COL_SEL_TEXT;
-	st.accent = COL_ACCENT;
-	st.font_px = 16 * ui_scale;
-	st.list_align = THEME_ALIGN_LEFT;
+	// Showcase is a systems-level presentation only; game lists always need
+	// the text list and media panel.
+	st.showcase = s->showcase && (ui_level == LV_SYSTEMS);
 	st.have_panel = 1;
+	st.text = s->col_text;
+	st.dim = s->col_dim;
+	st.sel_bg = s->col_sel_bar;
+	st.sel_text = s->col_sel_text;
+	st.accent = s->col_accent;
+	st.font_px = s->font_px;
+	st.list_align = s->list_align;
 
-	theme_unload();
-	if (!cfg.fbui_theme[0]) return;
-
-	char base[1024], xml[1300];
-	static char es_buf[NAME_LEN];
-	snprintf(base, sizeof(base), "%s/themes/%s", getRootDir(), cfg.fbui_theme);
-
-	const char *es = NULL;
-	int found = 0, borrowed = 0;
-	int want_system = (ui_level == LV_SYSTEMS);
-
-	if (want_system && item_cnt)
-		es = sel_es_name();
-	else if (cur_sys[0])
-	{
-		es = es_sys_name(cur_sys);
-		snprintf(xml, sizeof(xml), "%s/%s/theme.xml", base, es);
-		found = !access(xml, R_OK);
-	}
-	if (!found)
-	{
-		snprintf(xml, sizeof(xml), "%s/theme.xml", base);
-		found = !access(xml, R_OK);
-	}
-	if (!found)
-	{
-		// no matching theme: borrow the first per-system one for global
-		// styling (its system-specific logos get hidden below)
-		DIR *d = opendir(base);
-		if (d)
-		{
-			struct dirent *de;
-			while ((de = readdir(d)))
-			{
-				if (de->d_name[0] == '.') continue;
-				snprintf(xml, sizeof(xml), "%s/%s/theme.xml", base, de->d_name);
-				if (!access(xml, R_OK))
-				{
-					snprintf(es_buf, sizeof(es_buf), "%s", de->d_name);
-					es = es_buf;
-					found = 1;
-					borrowed = 1;
-					break;
-				}
-			}
-			closedir(d);
-		}
-	}
-	if (!found) return;
-
-	const char *sysname = want_system && item_cnt ? items[sel].name
-	                     : (cur_sys[0] ? cur_sys : (es ? es : ""));
-	const char *systheme = es ? es : "";
-
-	int loaded = 0;
-	if (want_system)
-	{
-		// Atlas/Carbon "system" view = full-bleed art + carousel. We keep the
-		// art and draw the logo ourselves (carousel is unsupported).
-		loaded = theme_load(xml, "system", sysname, systheme, scr_w, scr_h) > 0;
-		if (loaded) st.showcase = 1;
-	}
-	if (!loaded)
-		loaded = theme_load(xml, "detailed", sysname, systheme, scr_w, scr_h) > 0
-		      || theme_load(xml, "basic", sysname, systheme, scr_w, scr_h) > 0;
-	if (!loaded)
-	{
-		theme_unload();
-		return;
-	}
-
-	// Two explicit font profiles: 240p is integer-scaled bitmap only; HD keeps
-	// the theme's anti-aliased TrueType face.
-	theme_set_bitmap_font(ui_lowres);
-
-	if (st.showcase)
-	{
-		// carousel-driven labels/logo/bg: we paint those per selection;
-		// keep only the solid backdrop color from the theme
-		theme_set_hidden("logo,system-background,system-manufacturer,system-fullname,"
-			"system-year,system-description,system-count,system-count-single,"
-			"system-count-null");
-		st.font_px = scr_h / 28;
-		if (st.font_px < (ui_lowres ? 16 : 12)) st.font_px = (ui_lowres ? 16 : 12);
-		st.have_panel = 0;
-	}
-	else
-	{
-		theme_set_hidden(borrowed ? "logo,logo2,ControllerOverlay" : "");
-		theme_list_style_t ls;
-		if (theme_get_list(&ls))
-		{
-			st.text = ls.primary & 0xFFFFFF;
-			st.accent = ls.secondary & 0xFFFFFF;
-			st.sel_bg = ls.sel_bar & 0xFFFFFF;
-			st.sel_text = ls.sel_text & 0xFFFFFF;
-			st.font_px = ls.font_px;
-			st.list_align = ls.align;
-		}
-		if (ui_lowres) st.font_px = 16;
-	}
-	st.use_theme = 1;
+	// 240p is bitmap-only. A hinted TrueType face at 16px on a 240-line CRT is
+	// less legible than the unifont cells and has worse CJK coverage.
+	fbui_ttf_set_font(s->lowres ? NULL : s->font);
 }
 
-// classic layout, then override geometry with the theme's textlist/md_image
 static void layout_apply()
 {
 	layout_compute();
-	if (!st.use_theme) return;
 	if (st.showcase)
 	{
 		// single-item carousel: no on-screen list geometry needed
@@ -661,78 +606,66 @@ static void layout_apply()
 		list_w = 0;
 		row_h = scr_h;
 		st.have_panel = 0;
-		return;
-	}
-	if (ui_lowres)
-	{
-		// Batocera themes target 16:9 HD screens.  Keep their colors and safe
-		// background composition, but use the dedicated three-row 240p browser
-		// geometry so every theme remains readable and navigable on a CRT.
-		st.have_panel = 1;
-		return;
-	}
-
-	theme_list_style_t ls;
-	if (theme_get_list(&ls) && ls.w > 40 && ls.h > 40)
-	{
-		list_x = ls.x;
-		list_y = ls.y;
-		list_w = ls.w;
-		row_h = ui_lowres ? 36 : ls.row_h;
-		list_rows = ls.h / row_h;
-		if (list_rows < 1) list_rows = 1;
-	}
-
-	int px, py, pw, ph;
-	if (theme_get_image_rect("md_image", &px, &py, &pw, &ph) && pw > 0 && ph > 0)
-	{
-		panel_x = px;
-		panel_y = py;
-		panel_w = pw;
-		panel_h = ph;
-		st.have_panel = 1;
-	}
-	else
-	{
-		st.have_panel = 0;
 	}
 }
 
-// text dispatch: theme TTF engine when a theme is active, bitmap engine else
+// The bitmap face only exists at multiples of its 16px design size, so a
+// requested pixel height snaps to the nearest whole multiple. Rounding down
+// instead would drop 1080p's 25px footer to 16px — half the body text rather
+// than the intended 80% — and cap the 42px title at 32px.
+static inline int bitmap_scale(int px)
+{
+	if (ui_lowres) return 1;
+	int s = (px + 8) / 16;
+	return s < 1 ? 1 : s;
+}
+
+// text dispatch: TrueType when the skin supplies one, bitmap engine otherwise
 static int ui_text(int x, int y, const char *s, uint32_t color, int px, int max_w, int align)
 {
-	if (st.use_theme && !ui_lowres)
+	if (!ui_lowres && fbui_ttf_available())
 	{
-		int w = theme_draw_text(shadow, scr_w, scr_h, x, y, s, color, px, max_w, align);
+		int w = fbui_ttf_draw(shadow, scr_w, scr_h, x, y, s, color, px, max_w, align);
 		dirty_add(x, y, x + ((max_w > 0) ? max_w : w), y + px + px / 4 + 1);
 		return w;
 	}
 
-	int sc = ui_lowres ? 1 : ((px >= 28) ? 2 : 1);
-	if (max_w > 0 && align != THEME_ALIGN_LEFT)
+	int sc = bitmap_scale(px);
+	if (max_w > 0 && align != SKIN_ALIGN_LEFT)
 	{
 		int tw = text_width(s, sc);
-		if (tw < max_w) x += (align == THEME_ALIGN_CENTER) ? (max_w - tw) / 2 : (max_w - tw);
+		if (tw < max_w) x += (align == SKIN_ALIGN_CENTER) ? (max_w - tw) / 2 : (max_w - tw);
 	}
 	return draw_text(x, y, s, color, sc, max_w);
 }
 
-static int classic_text_scale()
+// fill a rect in the static layer (bglayer), not the shadow buffer
+static void bg_fill(int x, int y, int w, int h, uint32_t color)
 {
-	return ui_lowres ? 1 : ui_scale;
+	if (x < 0) { w += x; x = 0; }
+	if (y < 0) { h += y; y = 0; }
+	if (x + w > scr_w) w = scr_w - x;
+	if (y + h > scr_h) h = scr_h - y;
+	if (w <= 0 || h <= 0) return;
+
+	for (int j = 0; j < h; j++)
+	{
+		uint32_t *p = bglayer + (size_t)(y + j) * scr_w + x;
+		for (int i = 0; i < w; i++) *p++ = color;
+	}
 }
 
-// render the static layer: theme elements, or the classic vertical gradient
+// Build the complete static layer: either the skin's pre-composited bg.png
+// (decoded once, cached, then a straight memcpy), or an equivalent composition
+// drawn here. Everything downstream only ever calls bg_restore, so there is a
+// single drawing path whether or not a package is installed.
 static void render_bglayer()
 {
-	if (st.use_theme)
-	{
-		theme_render_static(bglayer, scr_w, scr_h);
-		return;
-	}
+	const skin_t *s = skin();
+	if (skin_fill_background(bglayer, scr_w, scr_h)) return;
 
-	int r0 = (COL_BG_TOP >> 16) & 0xFF, g0 = (COL_BG_TOP >> 8) & 0xFF, b0 = COL_BG_TOP & 0xFF;
-	int r1 = (COL_BG_BOT >> 16) & 0xFF, g1 = (COL_BG_BOT >> 8) & 0xFF, b1 = COL_BG_BOT & 0xFF;
+	int r0 = (s->col_bg_top >> 16) & 0xFF, g0 = (s->col_bg_top >> 8) & 0xFF, b0 = s->col_bg_top & 0xFF;
+	int r1 = (s->col_bg_bot >> 16) & 0xFF, g1 = (s->col_bg_bot >> 8) & 0xFF, b1 = s->col_bg_bot & 0xFF;
 	for (int y = 0; y < scr_h; y++)
 	{
 		int r = r0 + (r1 - r0) * y / scr_h;
@@ -741,6 +674,20 @@ static void render_bglayer()
 		uint32_t c = (uint32_t)((r << 16) | (g << 8) | b);
 		uint32_t *p = bglayer + (size_t)y * scr_w;
 		for (int x = 0; x < scr_w; x++) *p++ = c;
+	}
+
+	if (st.showcase) return; // full-bleed system art is painted over this
+
+	int bx = safe_l;
+	int bw = scr_w - safe_l - safe_r;
+	int accent_h = 2 * ui_scale;
+	bg_fill(bx, safe_t, bw, header_h, s->col_header);
+	bg_fill(bx, safe_t + header_h - accent_h, bw, accent_h, s->col_accent);
+	bg_fill(bx, scr_h - safe_b - footer_h, bw, footer_h, s->col_header);
+	if (st.have_panel)
+	{
+		bg_fill(panel_x, panel_y, panel_w, panel_h, s->col_panel);
+		bg_fill(panel_x, panel_y, panel_w, accent_h, s->col_accent);
 	}
 }
 
@@ -1089,19 +1036,12 @@ static void gamelist_apply_names(const char *dir)
 		printf("FBUI: gamelist names applied: %d\n", applied);
 }
 
-// theme reload guard: only re-parse XML when theme name or system changes
-static char theme_key[NAME_LEN + 80] = "\x01";
-
-static void theme_refresh()
+// The skin is parsed once per FBUI start (the output resolution cannot change
+// mid-session), so switching browser level only re-derives the style and
+// geometry from the already-loaded package. No file I/O happens here.
+static void style_refresh()
 {
-	char key[sizeof(theme_key)];
-	// showcase swaps art per selection without re-parsing the theme XML
-	snprintf(key, sizeof(key), "%s|%d|%s", cfg.fbui_theme, ui_level, cur_sys);
-	if (strcmp(key, theme_key))
-	{
-		snprintf(theme_key, sizeof(theme_key), "%s", key);
-		theme_apply();
-	}
+	skin_apply();
 	layout_apply();
 }
 
@@ -1116,7 +1056,7 @@ static void enter_systems()
 	games_root(root, sizeof(root));
 	scan_dir(root, 0);
 	maybe_add_arcade_system();
-	theme_refresh();
+	style_refresh();
 	sc_prefetch_reset();
 	need_full_redraw = 1;
 }
@@ -1131,7 +1071,11 @@ static void enter_games()
 		char adir[1024];
 		snprintf(adir, sizeof(adir), "%s/_Arcade", getRootDir());
 		gamelist_apply_names(adir);
-		theme_refresh();
+		style_refresh();
+		// The previous directory's covers can never be hit again, and holding
+		// them would only shrink the window available to this list.
+		th_cache_clear_all();
+		th_cache_reset();
 		need_full_redraw = 1;
 		return;
 	}
@@ -1139,7 +1083,9 @@ static void enter_games()
 	cur_dir_path(path, sizeof(path));
 	scan_dir(path, 1);
 	gamelist_apply_names(path);
-	theme_refresh();
+	style_refresh();
+	th_cache_clear_all();
+	th_cache_reset();
 	need_full_redraw = 1;
 }
 
@@ -1220,10 +1166,9 @@ static int render_game_backdrop_layer(void)
 		for (int col = 0; col < w; col++) p[col] = 0x000000;
 	}
 	// 640x240 is presented as 4:3 on a CRT: framebuffer pixels are about half
-	// as wide as they are tall. Correct that pixel aspect so a square-pixel 4:3
-	// screenshot appears near full-screen instead of as a narrow center strip.
-	return theme_blit_image_fit_par(bglayer, scr_w, scr_h, image, x, y, w, h,
-		1, ui_lowres ? 2 : 1);
+	// as wide as they are tall. The skin's pixel aspect corrects that, so a
+	// square-pixel 4:3 screenshot fills the screen instead of a narrow strip.
+	return skin_img_blit_file(bglayer, scr_w, scr_h, image, x, y, w, h, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -1277,109 +1222,52 @@ static void preview_start(const char *video, int bx, int by, int bw, int bh)
 static int preview_blit(int bx, int by, int bw, int bh)
 {
 	if (access("/tmp/fbui_prev.png", R_OK)) return 0;
-	theme_blit_image_file(shadow, scr_w, scr_h, "/tmp/fbui_prev.png", bx, by, bw, bh);
+	skin_img_blit_file(shadow, scr_w, scr_h, "/tmp/fbui_prev.png", bx, by, bw, bh, 0);
 	dirty_add(bx, by, bx + bw, by + bh);
 	return 1;
-}
-
-// blend cover (keeping aspect) into the panel area of the shadow buffer
-static void draw_cover(const char *file, int box_x, int box_y, int box_w, int box_h)
-{
-	Imlib_Image img = imlib_load_image(file);
-	if (!img) return;
-
-	imlib_context_set_image(img);
-	int sw = imlib_image_get_width();
-	int sh = imlib_image_get_height();
-	if (sw <= 0 || sh <= 0) { imlib_free_image(); return; }
-
-	int dw = box_w, dh = sh * box_w / sw;
-	if (dh > box_h) { dh = box_h; dw = sw * box_h / sh; }
-	int dx = box_x + (box_w - dw) / 2;
-	int dy = box_y + (box_h - dh) / 2;
-
-	Imlib_Image dst = imlib_create_image_using_data(scr_w, scr_h, shadow);
-	if (dst)
-	{
-		imlib_context_set_image(dst);
-		imlib_blend_image_onto_image(img, 0, 0, 0, sw, sh, dx, dy, dw, dh);
-		imlib_free_image(); // frees dst wrapper, not shadow
-		dirty_add(dx, dy, dx + dw, dy + dh);
-	}
-
-	imlib_context_set_image(img);
-	imlib_free_image();
 }
 
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
 
+// width of a string in the engine ui_text would actually use
+static int ui_text_width(const char *s, int px)
+{
+	if (!ui_lowres && fbui_ttf_available()) return fbui_ttf_width(s, px);
+	return text_width(s, bitmap_scale(px));
+}
+
 static void render_header()
 {
 	if (st.showcase) return; // counter drawn inside render_showcase
 
-	if (st.use_theme)
-	{
-		int px = st.font_px;
-		int m = scr_w / 60 + 4;
-		if (ui_lowres) m = safe_l + 4;
+	const skin_t *s = skin();
+	int hx = safe_l;
+	int hy = safe_t;
+	int hw = scr_w - safe_l - safe_r;
+	int pad = s->row_pad;
 
-		// title, centered in the top band (the theme's logo slot region;
-		// empty at systems level). Top-left is off limits: themes like
-		// Atlas put the game-art box there and render_panel would erase
-		// anything below its top edge.
-		if (ui_level == LV_SYSTEMS)
-		{
-			// Keep the 240p title at the same readable 16px size as rows.
-			// Scaling it again would collide with the first list row.
-			int tpx = ui_lowres ? 16 : px + px / 3;
-			int ty = scr_h * 74 / 1000 - tpx / 2;
-			if (ui_lowres) ty = safe_t + 2;
-			else if (ty < 4) ty = 4;
-			int tw = ui_lowres ? (scr_w - safe_l - safe_r) : (scr_w * 44 / 100);
-			int tx = ui_lowres ? safe_l : (scr_w - tw) / 2;
-			bg_restore(tx - 4, 0, tw + 8, scr_h * 13 / 100);
-			ui_text(tx, ty, "游戏库 GAME LIBRARY", 0xE0E0E0, tpx, tw, THEME_ALIGN_CENTER);
-		}
+	// The band itself lives in the static layer, so only the text is repainted.
+	bg_restore(hx, hy, hw, header_h);
 
-		// At 240p the 2x title uses the whole safe top band; the counter would
-		// overlap it, so the selected row itself remains the only indicator.
-		if (!ui_lowres)
-		{
-			int bw = px * 8;
-			char cnt[48];
-			snprintf(cnt, sizeof(cnt), "%d / %d", item_cnt ? sel + 1 : 0, item_cnt);
-			bg_restore(scr_w - bw - m, m / 2, bw, px + px / 4 + 2);
-			ui_text(scr_w - bw - m, m / 2, cnt, st.dim, px, bw, THEME_ALIGN_RIGHT);
-		}
-		return;
-	}
+	int tpx = s->title_px;
+	int ty = hy + (header_h - tpx) / 2;
+	if (ty < hy) ty = hy;
 
-	int hx = ui_lowres ? safe_l : 0;
-	int hy = ui_lowres ? safe_t : 0;
-	int hw = ui_lowres ? (scr_w - safe_l - safe_r) : scr_w;
-	int ts = classic_text_scale();
-	fill_rect(hx, hy, hw, header_h, COL_HEADER);
-	fill_rect(hx, hy + header_h - 2 * ui_scale, hw, 2 * ui_scale, COL_ACCENT);
-
-	int ty = hy + (header_h - 16 * ts) / 2;
-	if (ui_level == LV_SYSTEMS)
-	{
-		draw_text(list_x, ty, "游戏库 GAME LIBRARY", 0xFFFFFF, ts, scr_w / 2);
-	}
-	else
-	{
-		char t[300];
-		if (cur_rel[0]) snprintf(t, sizeof(t), "%s / %s", cur_sys, cur_rel);
-		else snprintf(t, sizeof(t), "%s", cur_sys);
-		draw_text(list_x, ty, t, 0xFFFFFF, ts, scr_w / 2);
-	}
+	char title[300];
+	if (ui_level == LV_SYSTEMS) snprintf(title, sizeof(title), "游戏库 GAME LIBRARY");
+	else if (cur_rel[0]) snprintf(title, sizeof(title), "%s / %s", cur_sys, cur_rel);
+	else snprintf(title, sizeof(title), "%s", cur_sys);
 
 	char cnt[48];
 	snprintf(cnt, sizeof(cnt), "%d / %d", item_cnt ? sel + 1 : 0, item_cnt);
-	int cw = text_width(cnt, ts);
-	draw_text(scr_w - safe_r - cw - 8, ty, cnt, COL_DIM, ts, 0);
+	int cw = ui_text_width(cnt, s->font_px);
+
+	int tw = hw - cw - 3 * pad;
+	if (tw > 0) ui_text(hx + pad, ty, title, s->col_title, tpx, tw, SKIN_ALIGN_LEFT);
+	ui_text(hx + hw - cw - pad, hy + (header_h - s->font_px) / 2, cnt, st.dim,
+		s->font_px, cw, SKIN_ALIGN_RIGHT);
 }
 
 static void render_footer()
@@ -1387,67 +1275,21 @@ static void render_footer()
 	int show_msg_now = (msg_text[0] && !CheckTimer(msg_timer));
 	if (!show_msg_now) msg_text[0] = 0;
 
-	if (st.use_theme)
+	const skin_t *s = skin();
+	int fx = safe_l;
+	int fy = scr_h - safe_b - footer_h;
+	int fw = scr_w - safe_l - safe_r;
+	int fpx = s->footer_px;
+	int pad = s->row_pad;
+
+	bg_restore(fx, fy, fw, footer_h);
+
+	int ty = fy + (footer_h - fpx) / 2;
+	if (ty < fy) ty = fy;
+
+	if (show_msg_now)
 	{
-		int hx, hy, hpx;
-		uint32_t hc;
-		if (!theme_get_help(&hx, &hy, &hc, &hpx))
-		{
-			hpx = st.font_px * 4 / 5;
-			hx = scr_w / 60 + 4;
-			hy = scr_h - hpx * 2;
-			hc = st.dim;
-		}
-		if (ui_lowres)
-		{
-			// Use the same 16px cell as the list so the footer stays clear.
-			hpx = 16;
-			hx = safe_l;
-			hy = scr_h - safe_b - hpx - 2;
-		}
-		if (hpx < 10) hpx = 10;
-		bg_restore(0, hy - 2, scr_w, scr_h - hy + 2);
-
-		if (show_msg_now)
-		{
-			ui_text(hx, hy, msg_text, 0xFFB040, hpx, scr_w - hx - 8, THEME_ALIGN_LEFT);
-			return;
-		}
-
-		// icon + label pairs (Atlas help icons; fall back to plain text)
-		struct { const char *icon; const char *label; } tips[3];
-		int ntips = 0;
-		if (ui_level == LV_SYSTEMS)
-		{
-			tips[ntips++] = { "a", "进入" };
-			tips[ntips++] = { "start", "经典菜单" };
-		}
-		else
-		{
-			tips[ntips++] = { "a", "启动" };
-			tips[ntips++] = { "b", "返回" };
-			tips[ntips++] = { "start", "经典菜单" };
-		}
-
-		int x = hx;
-		int ih = hpx + 4;
-		for (int i = 0; i < ntips; i++)
-		{
-			char ipath[1300];
-			snprintf(ipath, sizeof(ipath), "%s/themes/%s/assets/icons/help/switch/%s.png",
-				getRootDir(), cfg.fbui_theme, tips[i].icon);
-			if (access(ipath, R_OK))
-				snprintf(ipath, sizeof(ipath), "%s/themes/%s/assets/icons/help/xboxone/%s.png",
-					getRootDir(), cfg.fbui_theme, tips[i].icon);
-			if (!access(ipath, R_OK))
-			{
-				theme_blit_image_file(shadow, scr_w, scr_h, ipath, x, hy - 2, ih, ih);
-				dirty_add(x, hy - 2, x + ih, hy - 2 + ih);
-				x += ih + 4;
-			}
-			int tw = ui_text(x, hy, tips[i].label, hc & 0xFFFFFF, hpx, 0, THEME_ALIGN_LEFT);
-			x += tw + hpx;
-		}
+		ui_text(fx + pad, ty, msg_text, s->col_msg, fpx, fw - 2 * pad, SKIN_ALIGN_LEFT);
 		return;
 	}
 
@@ -1455,16 +1297,7 @@ static void render_footer()
 		? ((ui_level == LV_SYSTEMS) ? "A 进入   START 菜单" : "A 启动   B 返回   START 菜单")
 		: ((ui_level == LV_SYSTEMS) ? "ENTER 进入   F12/ESC 经典菜单"
 		                              : "ENTER 启动   BACKSPACE 返回   F12/ESC 经典菜单");
-	int y = scr_h - safe_b - footer_h;
-	int fx = ui_lowres ? safe_l : 0;
-	int fw = ui_lowres ? (scr_w - safe_l - safe_r) : scr_w;
-	int ts = classic_text_scale();
-	fill_rect(fx, y, fw, footer_h, COL_HEADER);
-	int ty = y + (footer_h - 16 * ts) / 2;
-	if (show_msg_now)
-		draw_text(list_x, ty, msg_text, 0xFFB040, ts, scr_w - safe_r - list_x);
-	else
-		draw_text(list_x, ty, hint, COL_DIM, ts, scr_w - safe_r - list_x);
+	ui_text(fx + pad, ty, hint, st.dim, fpx, fw - 2 * pad, SKIN_ALIGN_LEFT);
 }
 
 static void render_row(int row)
@@ -1486,8 +1319,8 @@ static void render_row(int row)
 	entry_t *e = &items[idx];
 	uint32_t fg = (idx == sel) ? st.sel_text : (e->is_dir ? st.accent : st.text);
 
-	int px = st.use_theme ? st.font_px : 16 * ui_scale;
-	int pad = st.use_theme ? (row_h / 4 + 2) : (ui_lowres ? 4 : 8 * ui_scale);
+	int px = st.font_px;
+	int pad = skin()->row_pad;
 	int tx = list_x + pad;
 	int ty = y + (row_h - px) / 2;
 
@@ -1521,8 +1354,8 @@ static void render_list()
 	render_scrollbar();
 	if (!item_cnt)
 	{
-		int px = st.use_theme ? st.font_px : 16 * ui_scale;
-		ui_text(list_x + 8 * ui_scale, list_y + row_h, "（空目录）", st.dim, px, list_w, THEME_ALIGN_LEFT);
+		ui_text(list_x + skin()->row_pad, list_y + row_h, "（空目录）", st.dim,
+			st.font_px, list_w, SKIN_ALIGN_LEFT);
 	}
 }
 
@@ -1530,23 +1363,11 @@ static void render_list()
 static int find_system_asset(const char *es, const char *fallback_name,
 	char *out, size_t sz, int want_logo)
 {
-	static const char *logo_cands[] = {
-		"%s/themes/%s/assets/systems/logos/%s-w.svg",
-		"%s/themes/%s/assets/systems/logos/%s-w.png",
-		"%s/themes/%s/assets/systems/logos/%s.svg",
-		"%s/themes/%s/assets/systems/logos/%s.png",
-		"%s/themes/%s/%s/art/system.svg",
-		"%s/themes/%s/%s/art/system.png",
-	};
-	static const char *bg_cands[] = {
-		"%s/themes/%s/assets/systems/background/%s.jpg",
-		"%s/themes/%s/assets/systems/background/%s.png",
-		"%s/themes/%s/%s/art/background.jpg",
-		"%s/themes/%s/%s/art/background.png",
-	};
-	const char **cands = want_logo ? logo_cands : bg_cands;
-	size_t n = want_logo ? sizeof(logo_cands)/sizeof(logo_cands[0])
-	                     : sizeof(bg_cands)/sizeof(bg_cands[0]);
+	// System art now comes from the skin package, pre-baked at the target
+	// resolution: sysbg/<es>.png for the backdrop, systems/<es>.png for the
+	// logo. Nothing is rasterised at runtime.
+	const char *sub = want_logo ? "systems" : "sysbg";
+	static const char *exts[] = { "png", "jpg" };
 
 	// try ES short name first, then the lowercased MiSTer folder name
 	const char *names[2];
@@ -1560,12 +1381,13 @@ static int find_system_asset(const char *es, const char *fallback_name,
 		if (!nnames || strcmp(low, names[0])) names[nnames++] = low;
 	}
 
+	char rel[NAME_LEN + 32];
 	for (int ni = 0; ni < nnames; ni++)
 	{
-		for (size_t i = 0; i < n; i++)
+		for (size_t i = 0; i < sizeof(exts) / sizeof(exts[0]); i++)
 		{
-			snprintf(out, sz, cands[i], getRootDir(), cfg.fbui_theme, names[ni]);
-			if (!access(out, R_OK)) return 1;
+			snprintf(rel, sizeof(rel), "%s/%s.%s", sub, names[ni], exts[i]);
+			if (skin_asset_path(rel, out, sz)) return 1;
 		}
 	}
 	out[0] = 0;
@@ -1616,10 +1438,54 @@ static size_t sc_mem_available(void)
 	return (size_t)kb * 1024;
 }
 
+// ---------------------------------------------------------------------------
+// Shared art cache budget
+// ---------------------------------------------------------------------------
+// The showcase art and the game thumbnails must not each size themselves from
+// MemAvailable independently: whichever ran first would take the lot and
+// starve the other. Both draw from this single pool and report their usage
+// here, so the split stays predictable regardless of navigation order.
+
+static size_t art_pool_limit = 0;
+static size_t art_pool_used = 0;
+
+// Thumbnails are the hot path (they change on every cursor move), so they get
+// the larger share; showcase art is only touched at the systems level.
+#define ART_SHARE_THUMB_PCT 60
+#define ART_SHARE_SC_PCT    40
+
+static void art_pool_init(void)
+{
+	// Size from what Linux can really use, not the board's nominal 1 GiB:
+	// MiSTer commonly exposes only about 492 MiB to the HPS kernel. Add our
+	// own usage back so re-entering a level does not shrink the limit and
+	// strand slots that are already populated.
+	size_t avail = sc_mem_available() + art_pool_used;
+	const size_t keep = 256U * 1024 * 1024;
+	size_t budget = (avail > keep) ? (avail - keep) : (48U * 1024 * 1024);
+
+	size_t cap = (size_t)skin()->cache_mb * 1024 * 1024;
+	if (budget > cap) budget = cap;
+	art_pool_limit = budget;
+
+	printf("FBUI: art cache pool %.1f MiB (MemAvailable %.1f MiB, in use %.1f MiB)\n",
+		art_pool_limit / 1048576.0, sc_mem_available() / 1048576.0,
+		art_pool_used / 1048576.0);
+}
+
+static size_t art_share(int pct)
+{
+	if (!art_pool_limit) art_pool_init();
+	return art_pool_limit / 100 * pct;
+}
+
 static void sc_slot_clear(sc_slot_t *s)
 {
-	if (s->bg) sc_cache_bytes -= (size_t)s->bg_w * s->bg_h * 4;
-	if (s->logo) sc_cache_bytes -= (size_t)s->logo_w * s->logo_h * 4;
+	size_t n = 0;
+	if (s->bg) n += (size_t)s->bg_w * s->bg_h * 4;
+	if (s->logo) n += (size_t)s->logo_w * s->logo_h * 4;
+	sc_cache_bytes -= n;
+	art_pool_used -= n;
 	free(s->bg);
 	free(s->logo);
 	memset(s, 0, sizeof(*s));
@@ -1640,19 +1506,12 @@ static void sc_prefetch_reset(void)
 		sc_prefetch_remaining = 0;
 		return;
 	}
-	// Size the cache from what Linux can really use, not the board's nominal
-	// 1 GiB. MiSTer commonly exposes only about 492 MiB to the HPS kernel.
-	// Keep at least 256 MiB available for the rest of the system.
-	const size_t slot_bytes = (size_t)SC_BG_MAX_W * SC_BG_MAX_H * 4
-		+ (size_t)SC_LOGO_MAX_W * SC_LOGO_MAX_H * 4;
-	size_t avail = sc_mem_available();
-	// Add our existing cache back when returning from a game list, otherwise
-	// MemAvailable would make the limit shrink and strand upper cache slots.
-	size_t effective_avail = avail + sc_cache_bytes;
-	size_t budget = (effective_avail > 256U * 1024 * 1024)
-		? effective_avail - 256U * 1024 * 1024 : 64U * 1024 * 1024;
-	if (budget > 192U * 1024 * 1024) budget = 192U * 1024 * 1024;
-	sc_slot_limit = (int)(budget / slot_bytes);
+	// Slot count comes out of the shared pool, so the thumbnail cache keeps its
+	// share no matter which level the user visits first.
+	const skin_t *sk = skin();
+	const size_t slot_bytes = (size_t)sk->sysbg_w * sk->sysbg_h * 4
+		+ (size_t)sk->syslogo_w * sk->syslogo_h * 4;
+	sc_slot_limit = (int)(art_share(ART_SHARE_SC_PCT) / (slot_bytes ? slot_bytes : 1));
 	if (sc_slot_limit < 5) sc_slot_limit = 5;
 	if (sc_slot_limit > SC_CACHE_SLOTS) sc_slot_limit = SC_CACHE_SLOTS;
 	sc_prefetch_idx = sel + 1;
@@ -1660,9 +1519,8 @@ static void sc_prefetch_reset(void)
 	sc_prefetch_remaining = item_cnt - 1;
 	if (sc_prefetch_remaining > sc_slot_limit - 1)
 		sc_prefetch_remaining = sc_slot_limit - 1;
-	printf("FBUI: system art cache budget %.1f MiB (%d slots), MemAvailable %.1f MiB\n",
-		(sc_slot_limit * slot_bytes) / 1048576.0, sc_slot_limit,
-		avail / 1048576.0);
+	printf("FBUI: system art cache %d slots x %.1f MiB\n",
+		sc_slot_limit, slot_bytes / 1048576.0);
 }
 
 static sc_slot_t *sc_find(const char *key)
@@ -1695,7 +1553,8 @@ static void blit_rgb_scale(uint32_t *dst, int dw, int dh, const uint32_t *src, i
 		int sy = y * sh / dh;
 		uint32_t *drow = dst + (size_t)y * dw;
 		const uint32_t *srow = src + (size_t)sy * sw;
-		for (int x = 0; x < dw; x++) drow[x] = srow[x * sw / dw];
+		// mask off alpha: the source is ARGB, the shadow buffer is xRGB
+		for (int x = 0; x < dw; x++) drow[x] = srow[x * sw / dw] & 0xFFFFFF;
 	}
 }
 
@@ -1740,13 +1599,20 @@ static int sc_decode_one(sc_slot_t *s, const char *es, const char *fallback_name
 {
 	if (!s) return 0;
 	char path[1300];
+	const skin_t *sk = skin();
 	if (!s->tried_bg)
 	{
 		s->tried_bg = 1;
 		if (find_system_asset(es, fallback_name, path, sizeof(path), 0))
 		{
-			s->bg = theme_load_cover_rgb(path, SC_BG_MAX_W, SC_BG_MAX_H, SC_BG_TINT, &s->bg_w, &s->bg_h);
-			if (s->bg) sc_cache_bytes += (size_t)s->bg_w * s->bg_h * 4;
+			s->bg = skin_img_load_cover(path, sk->sysbg_w, sk->sysbg_h, SC_BG_TINT,
+				&s->bg_w, &s->bg_h);
+			if (s->bg)
+			{
+				size_t n = (size_t)s->bg_w * s->bg_h * 4;
+				sc_cache_bytes += n;
+				art_pool_used += n;
+			}
 		}
 		return 1;
 	}
@@ -1755,8 +1621,14 @@ static int sc_decode_one(sc_slot_t *s, const char *es, const char *fallback_name
 		s->tried_logo = 1;
 		if (find_system_asset(es, fallback_name, path, sizeof(path), 1))
 		{
-			s->logo = theme_load_fit_rgb(path, SC_LOGO_MAX_W, SC_LOGO_MAX_H, &s->logo_w, &s->logo_h);
-			if (s->logo) sc_cache_bytes += (size_t)s->logo_w * s->logo_h * 4;
+			s->logo = skin_img_load_fit(path, sk->syslogo_w, sk->syslogo_h,
+				&s->logo_w, &s->logo_h);
+			if (s->logo)
+			{
+				size_t n = (size_t)s->logo_w * s->logo_h * 4;
+				sc_cache_bytes += n;
+				art_pool_used += n;
+			}
 		}
 		return 1;
 	}
@@ -1817,15 +1689,15 @@ static void render_showcase_labels(entry_t *e, int have_logo, int lx, int ly, in
 	if (!have_logo)
 	{
 		int px = ui_lowres ? 16 : st.font_px * 2;
-		ui_text(lx, ly + lh / 2 - px / 2, label, 0xFFFFFF, px, lw, THEME_ALIGN_CENTER);
+		ui_text(lx, ly + lh / 2 - px / 2, label, 0xFFFFFF, px, lw, SKIN_ALIGN_CENTER);
 	}
 	int npx = ui_lowres ? 16 : st.font_px + st.font_px / 4;
-	ui_text(lx, ny, label, 0xF0F0F0, npx, lw, THEME_ALIGN_CENTER);
+	ui_text(lx, ny, label, 0xF0F0F0, npx, lw, SKIN_ALIGN_CENTER);
 	ny += npx + (ui_lowres ? 2 : st.font_px / 2);
 	char cnt[48];
 	snprintf(cnt, sizeof(cnt), "%d / %d", sel + 1, item_cnt);
 	int cpx = ui_lowres ? 16 : st.font_px;
-	ui_text(scr_w / 4, ny, cnt, 0xC0C0C0, cpx, scr_w / 2, THEME_ALIGN_CENTER);
+	ui_text(scr_w / 4, ny, cnt, 0xC0C0C0, cpx, scr_w / 2, SKIN_ALIGN_CENTER);
 }
 
 // Lightweight scrub while the stick is moving: only refresh the title strip.
@@ -1851,10 +1723,10 @@ static void render_showcase_scrub(void)
 
 	bg_restore(0, ty, scr_w, th);
 	const char *label = e->disp[0] ? e->disp : e->name;
-	ui_text(lx, ty, label, 0xF0F0F0, npx, lw, THEME_ALIGN_CENTER);
+	ui_text(lx, ty, label, 0xF0F0F0, npx, lw, SKIN_ALIGN_CENTER);
 	char cnt[48];
 	snprintf(cnt, sizeof(cnt), "%d / %d", sel + 1, item_cnt);
-	ui_text(scr_w / 4, ty + npx + gap, cnt, 0xC0C0C0, cpx, scr_w / 2, THEME_ALIGN_CENTER);
+	ui_text(scr_w / 4, ty + npx + gap, cnt, 0xC0C0C0, cpx, scr_w / 2, SKIN_ALIGN_CENTER);
 }
 
 // Paint from cache only (no decode). Used on settle when assets already warm.
@@ -1895,6 +1767,159 @@ static void render_showcase(void)
 
 }
 
+// ---------------------------------------------------------------------------
+// Game thumbnail cache
+// ---------------------------------------------------------------------------
+// Entries are decoded straight to the panel box (pixel-aspect corrected), so a
+// cache hit is a plain alpha blend with no scaling. The window is sized by
+// BYTES, not by page count: at 240p a slot is ~130 KiB and the budget holds
+// hundreds of entries — effectively the whole list — while at 1080p a slot is
+// ~2.8 MiB and only the visible page plus a read-ahead margin fits. Sizing by
+// "current page plus one either side" would quietly need 194 MiB at 1080p and
+// collide with the showcase cache.
+
+#define TH_MAX_SLOTS 512
+
+struct th_slot_t
+{
+	char key[2400];   // source path
+	uint32_t *px;     // decoded ARGB at the panel box size (NULL = decode failed)
+	int w, h;
+	uint32_t tick;
+};
+
+static th_slot_t *th_cache = NULL;
+static int th_slots = 0;
+static uint32_t th_tick = 1;
+static size_t th_bytes = 0;
+static int th_prefetch_i = 0;
+
+static void th_slot_clear(th_slot_t *t)
+{
+	if (t->px)
+	{
+		size_t n = (size_t)t->w * t->h * 4;
+		th_bytes -= n;
+		art_pool_used -= n;
+		free(t->px);
+	}
+	memset(t, 0, sizeof(*t));
+}
+
+static void th_cache_clear_all(void)
+{
+	for (int i = 0; i < th_slots; i++) th_slot_clear(&th_cache[i]);
+	th_prefetch_i = 0;
+}
+
+static void th_cache_free(void)
+{
+	th_cache_clear_all();
+	free(th_cache);
+	th_cache = NULL;
+	th_slots = 0;
+}
+
+// Derive the window from the shared pool and the skin's fixed slot size.
+static void th_cache_reset(void)
+{
+	const skin_t *s = skin();
+	size_t slot = (size_t)s->thumb_w * s->thumb_h * 4;
+	if (!slot) slot = 1;
+
+	int n = (int)(art_share(ART_SHARE_THUMB_PCT) / slot);
+	int floor_n = list_rows + 4;   // visible page plus read-ahead
+	if (n < floor_n) n = floor_n;
+	if (n > TH_MAX_SLOTS) n = TH_MAX_SLOTS;
+
+	if (n != th_slots)
+	{
+		th_cache_free();
+		th_cache = (th_slot_t*)calloc((size_t)n, sizeof(th_slot_t));
+		th_slots = th_cache ? n : 0;
+	}
+	th_prefetch_i = 0;
+	printf("FBUI: thumbnail cache %d slots x %dx%d (%.1f MiB max)\n",
+		th_slots, s->thumb_w, s->thumb_h, (th_slots * slot) / 1048576.0);
+}
+
+static th_slot_t *th_find(const char *key)
+{
+	for (int i = 0; i < th_slots; i++)
+		if (th_cache[i].key[0] && !strcmp(th_cache[i].key, key)) return &th_cache[i];
+	return NULL;
+}
+
+// Fetch (decoding on miss). A failed decode still occupies its slot with a
+// NULL bitmap so the same unreadable file is not retried on every repaint.
+static th_slot_t *th_get(const char *path, int bw, int bh)
+{
+	if (!path || !path[0] || th_slots < 1 || !th_cache) return NULL;
+
+	th_slot_t *t = th_find(path);
+	if (t) { t->tick = ++th_tick; return t; }
+
+	int best = 0;
+	for (int i = 1; i < th_slots; i++)
+		if (th_cache[i].tick < th_cache[best].tick) best = i;
+	t = &th_cache[best];
+	th_slot_clear(t);
+	snprintf(t->key, sizeof(t->key), "%s", path);
+	t->tick = ++th_tick;
+
+	// Honour the display pixel aspect here, once: a 240p entry is stored
+	// pre-squashed so it can be blitted 1:1 later.
+	t->px = skin_img_load_fit_par(path, bw, bh, &t->w, &t->h);
+	if (t->px)
+	{
+		size_t n = (size_t)t->w * t->h * 4;
+		th_bytes += n;
+		art_pool_used += n;
+	}
+	return t;
+}
+
+static int thumb_draw(const char *path, int bx, int by, int bw, int bh)
+{
+	th_slot_t *t = th_get(path, bw, bh);
+	if (!t || !t->px) return 0;
+
+	int ox, oy, ow, oh;
+	skin_img_blend_box(shadow, scr_w, scr_h, t->px, t->w, t->h, bx, by, bw, bh,
+		&ox, &oy, &ow, &oh);
+	if (ow > 0 && oh > 0) dirty_add(ox, oy, ox + ow, oy + oh);
+	return 1;
+}
+
+// Warm one neighbour per idle tick, expanding outward from the selection so
+// the visible page fills first. The counter is monotonic, so a fully warm
+// list costs nothing.
+static int th_offset_at(int i)
+{
+	if (!i) return 0;
+	int d = (i + 1) / 2;
+	return (i & 1) ? d : -d;
+}
+
+static int th_prefetch_step(void)
+{
+	if (ui_level != LV_GAMES || !item_cnt || th_slots < 1) return 0;
+
+	while (th_prefetch_i < th_slots)
+	{
+		int idx = sel + th_offset_at(th_prefetch_i++);
+		if (idx < 0 || idx >= item_cnt || items[idx].is_dir) continue;
+
+		char cover[2400] = "";
+		find_media(items[idx].name, cover, sizeof(cover), NULL, 0);
+		if (!cover[0] || th_find(cover)) continue;
+
+		th_get(cover, panel_w, panel_h);
+		return 1;
+	}
+	return 0;
+}
+
 static void render_panel()
 {
 	if (st.showcase) return;
@@ -1903,95 +1928,11 @@ static void render_panel()
 		preview_stop();
 		return;
 	}
-	if (st.use_theme)
-	{
-		// md_image slot from the theme, or a default right-side box
-		int bx = panel_x, by = panel_y, bw = panel_w, bh = panel_h;
-		if (!st.have_panel)
-		{
-			int sw = scr_w - safe_l - safe_r;
-			int sh = scr_h - safe_t - safe_b;
-			bx = safe_l + sw * 56 / 100;
-			by = safe_t + sh * 28 / 100;
-			bw = sw * 38 / 100;
-			bh = sh * 44 / 100;
-		}
-		bg_restore(bx, by, bw, bh);
-		if (!item_cnt || sel >= item_cnt) return;
-		entry_t *e = &items[sel];
 
-		if (ui_level == LV_GAMES && !e->is_dir)
-		{
-			char cover[2400] = "", video[2400] = "";
-			find_media(e->name, cover, sizeof(cover), video, sizeof(video));
-			if (video[0])
-			{
-				preview_start(video, bx, by, bw, bh);
-				if (!preview_blit(bx, by, bw, bh) && cover[0])
-				{
-					theme_blit_image_file(shadow, scr_w, scr_h, cover, bx, by, bw, bh);
-					dirty_add(bx, by, bx + bw, by + bh);
-				}
-			}
-			else
-			{
-				preview_stop();
-				if (cover[0])
-				{
-					theme_blit_image_file(shadow, scr_w, scr_h, cover, bx, by, bw, bh);
-					dirty_add(bx, by, bx + bw, by + bh);
-				}
-				// no media → leave the theme background empty
-			}
-		}
-		else if (ui_level == LV_SYSTEMS)
-		{
-			// show the selected system's theme logo; layouts differ per theme
-			// (Carbon: <es>/art/system.svg, Atlas: assets/systems/logos/<es>.svg)
-			static const char *cand[] = {
-				"%s/themes/%s/%s/art/system.svg",
-				"%s/themes/%s/%s/art/system.png",
-				"%s/themes/%s/assets/systems/logos/%s-w.svg",
-				"%s/themes/%s/assets/systems/logos/%s.svg",
-				"%s/themes/%s/assets/systems/logos/%s.png",
-			};
-			char p[1300];
-			const char *es = es_sys_name(e->name);
-			p[0] = 0;
-			for (size_t ci = 0; ci < sizeof(cand) / sizeof(cand[0]); ci++)
-			{
-				snprintf(p, sizeof(p), cand[ci], getRootDir(), cfg.fbui_theme, es);
-				if (!access(p, R_OK)) break;
-				p[0] = 0;
-			}
-
-			if (p[0])
-			{
-				theme_blit_image_file(shadow, scr_w, scr_h, p, bx, by, bw, bh);
-				dirty_add(bx, by, bx + bw, by + bh);
-			}
-			else
-			{
-				// no art for this system: large dim name instead
-				ui_text(bx, by + bh / 2 - st.font_px, e->name, st.dim,
-					st.font_px * 2, bw, THEME_ALIGN_CENTER);
-			}
-		}
-		return;
-	}
-
-	fill_rect(panel_x, panel_y, panel_w, panel_h, COL_PANEL);
-	fill_rect(panel_x, panel_y, panel_w, 2 * ui_scale, COL_ACCENT);
-
+	int bx = panel_x, by = panel_y, bw = panel_w, bh = panel_h;
+	bg_restore(bx, by, bw, bh);
 	if (!item_cnt || sel >= item_cnt) return;
 	entry_t *e = &items[sel];
-
-	int pad = ui_lowres ? 4 : 10 * ui_scale;
-	int name_h = ui_lowres ? 36 : 40 * ui_scale;
-	int box_x = panel_x + pad;
-	int box_y = panel_y + pad;
-	int box_w = panel_w - 2 * pad;
-	int box_h = panel_h - name_h - 3 * pad;
 
 	if (ui_level == LV_GAMES && !e->is_dir)
 	{
@@ -1999,46 +1940,30 @@ static void render_panel()
 		find_media(e->name, cover, sizeof(cover), video, sizeof(video));
 		if (video[0])
 		{
-			preview_start(video, box_x, box_y, box_w, box_h);
-			if (!preview_blit(box_x, box_y, box_w, box_h) && cover[0])
-				draw_cover(cover, box_x, box_y, box_w, box_h);
+			preview_start(video, bx, by, bw, bh);
+			if (!preview_blit(bx, by, bw, bh) && cover[0]) thumb_draw(cover, bx, by, bw, bh);
 		}
 		else
 		{
 			preview_stop();
-			if (cover[0])
-				draw_cover(cover, box_x, box_y, box_w, box_h);
-			// no media → empty box
+			if (cover[0]) thumb_draw(cover, bx, by, bw, bh);
+			// no media -> leave the static layer showing
 		}
-
-		// file size
-		char full[2400], dir[2048];
-		cur_dir_path(dir, sizeof(dir));
-		snprintf(full, sizeof(full), "%s/%s", dir, e->name);
-		struct stat fst;
-		char info[64] = "";
-		if (!stat(full, &fst))
-		{
-			if (fst.st_size >= 1024 * 1024) snprintf(info, sizeof(info), "%.1f MB", fst.st_size / 1048576.0);
-			else snprintf(info, sizeof(info), "%ld KB", (long)(fst.st_size / 1024));
-		}
-		int iy = panel_y + panel_h - name_h - pad / 2;
-		draw_text(box_x, iy, info, COL_DIM, ui_scale, box_w);
+		return;
 	}
-	else
+
+	// systems / directories: the skin's pre-baked system logo when it has one
+	if (ui_level == LV_SYSTEMS)
 	{
-		// big label for system / directory
-		fill_rect(box_x, box_y, box_w, box_h, 0x0A0D12);
-		int tw = text_width(e->name, ui_scale * 2);
-		if (tw > box_w) tw = box_w;
-		draw_text(box_x + (box_w - tw) / 2, box_y + box_h / 2 - 16 * ui_scale,
-			e->name, COL_ACCENT, ui_scale * 2, box_w);
+		char p[1300];
+		if (find_system_asset(es_sys_name(e->name), e->name, p, sizeof(p), 1)
+		    && thumb_draw(p, bx, by, bw, bh))
+			return;
 	}
 
-	// name (bottom of panel)
-	int ny = panel_y + panel_h - name_h + pad / 2;
-	draw_text(box_x, ny, e->disp[0] ? e->disp : e->name, COL_TEXT,
-		classic_text_scale(), box_w);
+	// no art: a large dim label instead
+	ui_text(bx, by + bh / 2 - st.font_px, e->disp[0] ? e->disp : e->name, st.dim,
+		st.font_px * 2, bw, SKIN_ALIGN_CENTER);
 }
 
 static void render_full()
@@ -2283,8 +2208,12 @@ static int fbui_start()
 	scr_h = h;
 
 	hexfont_load();
+	// The boot picker fixes the output resolution for the whole session, so the
+	// skin package is resolved and parsed exactly once here.
+	skin_load(cfg.fbui_skin, scr_w, scr_h);
+	skin_apply();
 	layout_compute();
-	theme_key[0] = 1; theme_key[1] = 0; // force theme reload (resolution may differ)
+	art_pool_init();
 	dirty_reset();
 
 	enter_systems();
@@ -2307,6 +2236,9 @@ static void fbui_stop()
 	ui_active = 0;
 	preview_stop();
 	sc_cache_clear_all();
+	th_cache_free();
+	fbui_ttf_cache_clear();
+	skin_unload();
 
 	// restore the normal wallpaper + OSD menu
 	video_menu_bg(user_io_status_get("[3:1]"));
@@ -2358,6 +2290,9 @@ static void move_sel(int delta)
 	}
 	if (ui_level == LV_GAMES)
 	{
+		// Read-ahead is centred on the selection, so restart the walk whenever
+		// it moves. Already-cached neighbours are skipped, so this is cheap.
+		th_prefetch_i = 0;
 		// The selected screenshot is part of bglayer, so changing selection
 		// requires one complete composition rather than a right-panel repaint.
 		need_full_redraw = 1;
@@ -2520,24 +2455,33 @@ int fbui_ui_hook(uint32_t *pc)
 		nav_held = 0;
 		nav_busy = 0;
 	}
-	else if (!showcase_hold && !nav_held && st.showcase
+	else if (!showcase_hold && !nav_held
 	         && !need_full_redraw && !need_list_redraw && !need_panel_redraw)
 	{
-		// idle: at most ONE decode per tick (current first, then neighbors)
-		int did = 0;
-		if (item_cnt && sel < item_cnt)
+		if (st.showcase)
 		{
-			const char *es = es_sys_name(items[sel].name);
-			const char *key = (es && es[0]) ? es : items[sel].name;
-			sc_slot_t *cur = sc_alloc(key);
-			if (sc_decode_one(cur, es, items[sel].name))
+			// idle: at most ONE decode per tick (current first, then neighbors)
+			int did = 0;
+			if (item_cnt && sel < item_cnt)
 			{
-				render_showcase_paint();
-				render_footer();
-				did = 1;
+				const char *es = es_sys_name(items[sel].name);
+				const char *key = (es && es[0]) ? es : items[sel].name;
+				sc_slot_t *cur = sc_alloc(key);
+				if (sc_decode_one(cur, es, items[sel].name))
+				{
+					render_showcase_paint();
+					render_footer();
+					did = 1;
+				}
 			}
+			if (!did) sc_prefetch_step();
 		}
-		if (!did) sc_prefetch_step();
+		else if (ui_level == LV_GAMES)
+		{
+			// Warm one neighbouring cover per tick so scrolling lands on
+			// entries that are already decoded.
+			th_prefetch_step();
+		}
 	}
 
 	// keep video preview frames refreshing while ffmpeg updates the PNG

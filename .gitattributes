@@ -1,0 +1,9 @@
+# 跑在 WSL / MiSTer 上的脚本必须是 LF，被 autocrlf 转成 CRLF 会直接 "command not found"。
+*.sh text eol=lf
+
+# 皮肤配置由 bake.py 生成、由 MiSTer 上的 C++ 解析，统一 LF。
+# 只限皮肤包，避免影响仓库里已有的 .ini。
+skins/**/*.ini text eol=lf
+
+# 烘焙产物是二进制，不要做任何换行符转换。
+*.png binary

@@ -18,7 +18,7 @@ int fbui_ui_hook(uint32_t *pc);
 
 int fbui_active();
 
-// unifont record for fbui_theme fallback rendering:
+// unifont record, used by the 240p bitmap engine and as the TrueType fallback:
 // [0] = width flag (0 = 8px, 1 = 16px), [1..32] = row bitmaps (MSB left).
 // NULL when the glyph is missing or the .hex font was not loaded.
 const uint8_t *fbui_hexfont_get(uint32_t cp);

@@ -114,7 +114,8 @@ typedef struct {
 	uint16_t hdmi_off;
 	uint32_t keyboard_as_joystick[256];
 	uint8_t fbui;
-	char fbui_theme[64];
+	char fbui_theme[64];    // legacy, ignored: kept so old INIs don't fail to parse
+	char fbui_skin[64];
 } cfg_t;
 
 extern cfg_t cfg;

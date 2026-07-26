@@ -1,0 +1,6 @@
+# 3.7 MB 的字库源文件，gen.py 首次运行时自动下载
+unifont.hex
+
+# 无头截图和它的临时页面
+shot*.png
+.shot.html
